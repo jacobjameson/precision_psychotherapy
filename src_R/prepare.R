@@ -343,7 +343,9 @@ mh_sa <- mh_sa %>%
 demo <- read_excel("~/Sue Goldie Dropbox/Jacob Jameson/DBH data/demo.xlsx")
 demo <- clean_names(demo) %>%
   filter(division == 'MH') %>%
-  select(master_id, admission_date, location, program, age_group, prim_mh_dx, sex_fs)
+  mutate(program = ifelse(php_days > 0, 'PHP', program)) %>%
+  select(master_id, admission_date, location, program, 
+         age_group, prim_mh_dx, sex_fs)
 
 mh_sa <- merge(mh_sa, demo, by = c("master_id", "admission_date"), all.x = TRUE)
 

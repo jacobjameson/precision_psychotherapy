@@ -379,9 +379,7 @@ therapy_labels <- list(
   "motivational_interviewing" = "MI",
   "mindfulness" = "Mindfulness",
   "stages_of_change" = "Stages of Change",
-  "family_systems" = "Family Systems",
-  "trauma_informed" = "Trauma-Informed"
-)
+  "family_systems" = "Family Systems")
 
 for (col in names(therapy_labels)) {
   label <- therapy_labels[[col]]
@@ -501,7 +499,7 @@ cat(sprintf("   Therapies where therapist > patient (p < .05): %d/%d (%.0f%%)\n"
 cat(sprintf("   Median DeLong Z-statistic: %.2f\n", median(summary_stats$DeLong_Z, na.rm = TRUE)))
 
 cat("\n3. Therapies with Largest Therapist Advantage:\n")
-top_therapies <- summary_stats %>% arrange(desc(Delta_AUC_T_vs_P)) %>% head(3)
+top_therapies <- summary_stats %>% arrange(desc(Delta_AUC_T_vs_P)) 
 for (i in 1:nrow(top_therapies)) {
   cat(sprintf("   %s: Δ AUC = %.3f (p = %.4f)\n", 
               top_therapies$Therapy[i], 
@@ -711,9 +709,9 @@ if (length(plot_list) > 0) {
   
   combined_plot <- do.call(grid.arrange, c(plot_list, ncol = ncols, nrow = nrows))
   
-  ggsave("therapy_roc_curves.png", combined_plot, 
-         width = ncols * 2.5, height = nrows * 2.5 * 1.3, 
-         dpi = 300, bg = "white")
+  #ggsave("therapy_roc_curves.png", combined_plot, 
+  #       width = ncols * 2.5, height = nrows * 2.5 * 1.3, 
+  #       dpi = 300, bg = "white")
   
   cat("  Plot saved as 'therapy_roc_curves.png'\n")
 }
@@ -748,3 +746,143 @@ cat(sprintf("  - Adding patient info to therapist models: +%.3f AUC\n",
             mean(summary_stats$Delta_AUC_C_vs_T)))
 cat(sprintf("\n  - Propensity scores added to 'data' object (%d columns)\n", length(propensity_cols)))
 cat("  - Use these in your XGBoost model to control for selection bias\n")
+
+
+
+# ============================================================================
+# ROC CURVE VISUALIZATION - JAMA STYLE
+# ============================================================================
+
+library(ggplot2)
+library(gridExtra)
+
+cat("\nCreating ROC curve visualization...\n")
+
+# JAMA-compliant color scheme
+colors <- c(
+  "Patient Features" = "#0066CC",     # Blue
+  "Therapist Factors" = "#CC0000",    # Red  
+  "Combined" = "#009900"              # Green
+)
+
+# Create individual plots for each therapy
+plot_list <- list()
+
+for(i in seq_along(results)) {
+  res <- results[[i]]
+  
+  # Prepare data for plotting
+  plot_data <- rbind(
+    data.frame(
+      fpr = res$patient$fpr, 
+      tpr = res$patient$tpr,
+      model = "Patient Features",
+      auc = res$patient$auc
+    ),
+    data.frame(
+      fpr = res$therapist$fpr, 
+      tpr = res$therapist$tpr,
+      model = "Therapist Factors",
+      auc = res$therapist$auc
+    ),
+    data.frame(
+      fpr = res$combined$fpr, 
+      tpr = res$combined$tpr,
+      model = "Combined",
+      auc = res$combined$auc
+    )
+  )
+  
+  # Set factor order for legend
+  plot_data$model <- factor(
+    plot_data$model,
+    levels = c("Patient Features", "Therapist Factors", "Combined")
+  )
+  
+  # Get p-value for annotation
+  p_val <- res$delong_tests$t_vs_p$p_value
+  p_text <- if(!is.na(p_val)) {
+    if(p_val < 0.001) "P<.001" else sprintf("P=%.3f", p_val)
+  } else ""
+  
+  # Create the plot
+  p <- ggplot(plot_data, aes(x = fpr, y = tpr, color = model)) +
+    
+    # Diagonal reference line
+    geom_abline(intercept = 0, slope = 1, 
+                linetype = "dotted", color = "gray60", size = 0.5) +
+    
+    # ROC curves
+    geom_line(size = 1) +
+    
+    # Colors
+    scale_color_manual(
+      values = colors,
+      labels = sprintf("%s (AUC = %.2f)", 
+                       names(colors), 
+                       c(res$patient$auc, res$therapist$auc, res$combined$auc))
+    ) +
+    
+    # Clean axes
+    scale_x_continuous(
+      "False Positive Rate", 
+      breaks = seq(0, 1, 0.25),
+      limits = c(0, 1),
+      expand = c(0.01, 0.01)
+    ) +
+    scale_y_continuous(
+      "True Positive Rate", 
+      breaks = seq(0, 1, 0.25),
+      limits = c(0, 1),
+      expand = c(0.01, 0.01)
+    ) +
+    
+    # Title and theme
+    labs(
+      title = res$therapy,
+      x = "False Positive Rate",
+      y = "True Positive Rate",
+      color = NULL
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      # Title
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      
+      # Axes
+      axis.title = element_text(size = 11),
+      axis.text = element_text(size = 10, color = "black"),
+      axis.ticks = element_line(color = "black"),
+      
+      # Legend
+      legend.position = c(0.98, 0.02),
+      legend.justification = c(1, 0),
+      legend.background = element_rect(fill = "white", color = "black", size = 0.3),
+      legend.text = element_text(size = 9),
+      legend.key.size = unit(0.5, "lines"),
+      legend.margin = margin(2, 2, 2, 2),
+      
+      # Square aspect
+      aspect.ratio = 1
+    ) +
+    coord_fixed()
+  plot_list[[i]] <- p
+}
+
+# Combine all plots into a grid
+combined_plot <- do.call(gridExtra::grid.arrange, c(
+  plot_list, 
+  ncol = 4
+))
+
+
+ggsave(
+  "outputs/figures/figure2.png",
+  combined_plot,
+  width = 14,
+  height = ceiling(length(plot_list)/4) * 2.5 + 1.5,
+  dpi = 300,
+  bg = "white"
+)
+
+cat("Plots saved as Figure_ROC_Curves.pdf and .png\n")

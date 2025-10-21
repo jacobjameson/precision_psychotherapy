@@ -22,7 +22,7 @@ library(ggplot2)
 library(tidyr)
 
 # Set seed for reproducibility
-set.seed(42)
+set.seed(123)
 
 cat("\n")
 cat(rep("=", 90), "\n", sep="")
@@ -41,7 +41,7 @@ risk_order <- c("Low" = 1, "Moderate" = 2, "High" = 3)
 data <- data %>%
   mutate(
     risk_initial_num = risk_order[as.character(risk_level_initial)],
-    risk_first_num = risk_order[as.character(risk_level_srs_last)],
+    risk_first_num = risk_order[as.character(risk_level_srs_first)],
     improve = as.integer(risk_first_num < risk_initial_num),
     risk_change = risk_initial_num - risk_first_num
   )
@@ -90,7 +90,7 @@ propensity_features <- names(data)[grepl("^prop_", names(data))]
 
 # Treatment context features
 treatment_context_features <- c("therapy_duration_category", "delivery_method",
-                                "session_mode", "days_last_srs", "intake_to_pn")
+                                "session_mode")
 
 # Therapist/organizational features
 therapist_features <- c("therapist_name", "location", "program",
@@ -270,12 +270,43 @@ if(any(is.na(y_test))) {
 cat(sprintf("\nFinal matrix dimensions:\n"))
 cat(sprintf("  X_train: %d rows x %d columns\n", nrow(X_train), ncol(X_train)))
 cat(sprintf("  X_test: %d rows x %d columns\n", nrow(X_test), ncol(X_test)))
-
 # ============================================================================
-# PART 5: HYPERPARAMETER TUNING
+# PART 5: HYPERPARAMETER TUNING WITH TEMPORAL CROSS-VALIDATION
 # ============================================================================
+cat("\n[STEP 5] Hyperparameter tuning with temporal cross-validation...\n")
 
-cat("\n[STEP 5] Hyperparameter tuning for XGBoost...\n")
+# Function to create time series splits
+create_time_series_splits <- function(n_samples, n_splits = 3) {
+  # Calculate size of each test fold
+  test_size <- floor(n_samples / (n_splits + 1))
+  
+  splits <- list()
+  for(i in 1:n_splits) {
+    # Each split uses progressively more training data
+    train_end <- test_size * i
+    test_start <- train_end + 1
+    test_end <- min(train_end + test_size, n_samples)
+    
+    splits[[i]] <- list(
+      train = 1:train_end,
+      test = test_start:test_end
+    )
+  }
+  return(splits)
+}
+
+# Create temporal CV splits
+cv_splits <- create_time_series_splits(nrow(X_train), n_splits = 3)
+
+# Visualize the splits
+cat("  Temporal CV splits:\n")
+for(i in 1:length(cv_splits)) {
+  cat(sprintf("    Fold %d: Train [1:%d], Test [%d:%d]\n", 
+              i, 
+              max(cv_splits[[i]]$train),
+              min(cv_splits[[i]]$test),
+              max(cv_splits[[i]]$test)))
+}
 
 # Define parameter grid
 param_grid <- expand.grid(
@@ -289,15 +320,14 @@ param_grid <- expand.grid(
   lambda = c(0.5, 1, 2)
 )
 
-# Sample 100 combinations
-set.seed(123)
+# Sample combinations for efficiency
+set.seed(999)
 param_grid <- param_grid[sample(nrow(param_grid), 10), ]
-cat(sprintf("  Testing %d parameter combinations with 5-fold CV\n", nrow(param_grid)))
+cat(sprintf("  Testing %d parameter combinations with %d-fold temporal CV\n", 
+            nrow(param_grid), length(cv_splits)))
 
-# Function to evaluate parameters
-evaluate_params <- function(params_row, X, y, nfolds = 5) {
-  set.seed(123)
-  
+# Function to evaluate parameters with temporal CV
+evaluate_params_temporal <- function(params_row, X, y, splits) {
   params <- list(
     objective = "binary:logistic",
     eval_metric = "auc",
@@ -311,45 +341,80 @@ evaluate_params <- function(params_row, X, y, nfolds = 5) {
     lambda = params_row$lambda
   )
   
-  cv_result <- xgb.cv(
-    params = params,
-    data = xgb.DMatrix(X, label = y),
-    nrounds = 300,
-    nfold = nfolds,
-    early_stopping_rounds = 20,
-    verbose = 0,
-    prediction = FALSE
-  )
+  # Store AUC for each fold
+  fold_aucs <- numeric(length(splits))
+  fold_nrounds <- numeric(length(splits))
   
-  best_auc <- max(cv_result$evaluation_log$test_auc_mean)
-  best_iter <- which.max(cv_result$evaluation_log$test_auc_mean)
+  for(i in 1:length(splits)) {
+    # Get train and test indices for this fold
+    train_idx <- splits[[i]]$train
+    test_idx <- splits[[i]]$test
+    
+    # Create DMatrix objects for this fold
+    dtrain_fold <- xgb.DMatrix(X[train_idx, ], label = y[train_idx])
+    dtest_fold <- xgb.DMatrix(X[test_idx, ], label = y[test_idx])
+    
+    # Train model with early stopping
+    watchlist <- list(test = dtest_fold)
+    
+    model_fold <- xgb.train(
+      params = params,
+      data = dtrain_fold,
+      nrounds = 500,
+      watchlist = watchlist,
+      early_stopping_rounds = 30,
+      verbose = 0
+    )
+    
+    # Get predictions and calculate AUC
+    pred_fold <- predict(model_fold, dtest_fold)
+    auc_fold <- as.numeric(auc(roc(y[test_idx], pred_fold, quiet = TRUE)))
+    
+    fold_aucs[i] <- auc_fold
+    fold_nrounds[i] <- model_fold$best_iteration
+  }
   
-  return(list(auc = best_auc, nrounds = best_iter))
+  # Return mean AUC across folds
+  return(list(
+    mean_auc = mean(fold_aucs),
+    std_auc = sd(fold_aucs),
+    mean_nrounds = round(mean(fold_nrounds))
+  ))
 }
 
-# Grid search with progress bar
+# Grid search with temporal CV
 results <- data.frame(param_grid)
-results$cv_auc <- NA
+results$cv_auc_mean <- NA
+results$cv_auc_std <- NA
 results$best_nrounds <- NA
 
 pb <- txtProgressBar(min = 0, max = nrow(param_grid), style = 3)
-
 for(i in 1:nrow(param_grid)) {
-  eval_result <- evaluate_params(param_grid[i, ], X_train, y_train)
-  results$cv_auc[i] <- eval_result$auc
-  results$best_nrounds[i] <- eval_result$nrounds
+  eval_result <- evaluate_params_temporal(param_grid[i, ], X_train, y_train, cv_splits)
+  results$cv_auc_mean[i] <- eval_result$mean_auc
+  results$cv_auc_std[i] <- eval_result$std_auc
+  results$best_nrounds[i] <- eval_result$mean_nrounds
   setTxtProgressBar(pb, i)
 }
 close(pb)
 
-# Find best parameters
-best_idx <- which.max(results$cv_auc)
+# Find best parameters (highest mean AUC with lowest std for stability)
+# Use a combined score: mean_auc - 0.5 * std_auc to favor stable models
+results$score <- results$cv_auc_mean - 0.5 * results$cv_auc_std
+best_idx <- which.max(results$score)
 best_params <- results[best_idx, ]
 
 cat("\n\nBest parameters found:\n")
+cat(sprintf("  Mean CV AUC: %.4f (±%.4f)\n", 
+            best_params$cv_auc_mean, best_params$cv_auc_std))
 print(best_params[, c("max_depth", "eta", "subsample", "colsample_bytree",
-                      "min_child_weight", "gamma", "cv_auc", "best_nrounds")])
+                      "min_child_weight", "gamma", "alpha", "lambda", 
+                      "best_nrounds")])
 
+# Show top 5 parameter combinations
+cat("\nTop 5 parameter combinations:\n")
+top5 <- results[order(results$score, decreasing = TRUE)[1:5], ]
+print(top5[, c("max_depth", "eta", "cv_auc_mean", "cv_auc_std", "score")])
 # ============================================================================
 # PART 6: TRAIN FINAL MODEL
 # ============================================================================
@@ -418,6 +483,17 @@ cat(sprintf("  Specificity: %.1f%%\n", specificity * 100))
 cat(sprintf("  PPV: %.1f%%\n", ppv * 100))
 cat(sprintf("  NPV: %.1f%%\n", npv * 100))
 
+# get brier score
+brier_score <- mean((pred_test - y_test)^2)
+cat(sprintf("  Brier Score: %.4f\n", brier_score))
+
+# platt scaled probabilities
+platt_model <- glm(y_train ~ pred_train, family = binomial)
+platt_probs <- predict(platt_model, newdata = data.frame(pred_train = pred_test), type = "response")
+
+brier_score_platt <- mean((platt_probs - y_test)^2)
+cat(sprintf("  Brier Score (Platt scaled): %.4f\n", brier_score_platt))
+
 # ============================================================================
 # PART 7: FEATURE IMPORTANCE & SHAP ANALYSIS
 # ============================================================================
@@ -467,12 +543,22 @@ therapy_cols <- therapy_features[therapy_features %in% colnames(X_train)]
 cat(sprintf("  Found %d therapy modalities in data\n", length(therapy_cols)))
 
 dr_results <- list()
+therapy_to_prop <- c(
+  "act" = "prop_act",
+  "cbt" = "prop_cbt", 
+  "dbt" = "prop_dbt",
+  "motivational_interviewing" = "prop_mi",  # <- This is the issue
+  "mindfulness" = "prop_mindfulness",
+  "stages_of_change" = "prop_stages_of_change",  # <- Might also be abbreviated
+  "family_systems" = "prop_family_systems"  # <- Might also be abbreviated
+)
 
 for(therapy in therapy_cols) {
-  prop_col <- paste0("prop_", tolower(therapy))
+  prop_col <- therapy_to_prop[therapy]
   
-  if(prop_col %in% colnames(X_train)) {
+  if(!is.na(prop_col) && prop_col %in% colnames(X_train)) {
     T_i <- X_train[, therapy]
+    e_i <- X_train[, prop_col]
     e_i <- X_train[, prop_col]
     
     # Bound propensity scores away from 0 and 1
@@ -482,7 +568,7 @@ for(therapy in therapy_cols) {
     n_treated <- sum(T_i == 1)
     n_control <- sum(T_i == 0)
     
-    if(n_treated > 20 && n_control > 20) {
+
       # Fit separate models for treated and control
       X_without_therapy <- X_train[, !colnames(X_train) %in% therapy]
       
@@ -520,12 +606,10 @@ for(therapy in therapy_cols) {
       
       cat(sprintf("  %s: ATE = %.3f (95%% CI: %.3f to %.3f), n_treated=%d\n",
                   therapy, ate, ate - 1.96*se, ate + 1.96*se, n_treated))
-    } else {
-      cat(sprintf("  %s: Insufficient sample size (treated=%d, control=%d)\n",
-                  therapy, n_treated, n_control))
-    }
-  }
+    } 
+  
 }
+
 
 # ============================================================================
 # PART 9: COUNTERFACTUAL ANALYSIS
@@ -592,6 +676,23 @@ cat(sprintf("  Maximum gain: %.3f\n", max(personalization_gains)))
 cat(sprintf("  NNT to prevent one non-improvement: %.0f\n",
             ifelse(mean_gain > 0, 1/mean_gain, Inf)))
 
+# figure out percentage gain among patients who would benefit
+if(sum(personalization_gains > 0) > 0) {
+  mean_gain_benefiters <- mean(personalization_gains[personalization_gains > 0])
+  cat(sprintf("  Mean gain among benefiters: %.3f (%.1f%% relative improvement)\n",
+              mean_gain_benefiters,
+              mean_gain_benefiters / mean(pred_test[personalization_gains > 0]) * 100))
+} else {
+  cat("  No patients would benefit from therapy optimization.\n")
+}
+
+# figure out what predicted probability groups benefit most
+pred_bins <- cut(pred_test, breaks = seq(0, 1, by = 0.25), include.lowest = TRUE)
+gain_by_bin <- tapply(personalization_gains, pred_bins, mean)
+cat("\nMean Personalization Gain by Predicted Probability Bin:\n")
+for(bin in names(gain_by_bin)) {
+  cat(sprintf("  %s: %.3f\n", bin, gain_by_bin[bin]))
+}
 # ============================================================================
 # PART 10: VISUALIZATIONS
 # ============================================================================
@@ -619,7 +720,7 @@ p1 <- ggplot(data.frame(gain = personalization_gains * 100), aes(x = gain)) +
     plot.subtitle = element_text(size = 11, color = "#666666"),
     panel.grid.minor = element_blank()
   )
-
+p1
 ggsave("figure_personalization_distribution.png", p1, width = 10, height = 6, dpi = 300)
 
 # Figure 2: Therapy-Specific Associations (Doubly Robust)
@@ -681,6 +782,7 @@ p3 <- ggplot(baseline_risk_df, aes(x = baseline_prob, y = gain)) +
     plot.subtitle = element_text(size = 11, color = "#666666"),
     legend.position = "bottom"
   )
+p2
 
 ggsave("figure_heterogeneity.png", p3, width = 10, height = 6, dpi = 300)
 
@@ -732,17 +834,11 @@ manuscript_results <- list(
       paste(therapy_cols[x == 1], collapse = "+"))
   )
 )
+manuscript_results$personalization_summary
+manuscript_results$model_performance
+manuscript_results$feature_importance
 
 # Save RDS file
-saveRDS(manuscript_results, "manuscript_results.rds")
-
-# Save key statistics to CSV for easy import
-write.csv(manuscript_results$model_performance, "table_model_performance.csv", row.names = FALSE)
-write.csv(manuscript_results$feature_importance, "table_feature_importance.csv", row.names = FALSE)
-if(!is.null(manuscript_results$therapy_associations)) {
-  write.csv(manuscript_results$therapy_associations, "table_therapy_associations.csv", row.names = FALSE)
-}
-write.csv(manuscript_results$personalization_summary, "table_personalization_summary.csv", row.names = FALSE)
 
 cat("\nFiles saved:\n")
 cat("  - figure_personalization_distribution.png\n")
@@ -885,4 +981,435 @@ p_shap <- ggplot(shap_long, aes(x = shap_value, y = feature_clean)) +
   )
 
 p_shap
+
+
+
+# ============================================================================
+# PUBLICATION-READY FIGURE: SHAP AND DOUBLY ROBUST ESTIMATION
+# ============================================================================
+
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(viridis)
+
+# Set publication theme
+theme_publication <- function() {
+  theme_minimal() +
+    theme(
+      text = element_text(family = "Helvetica", size = 10),
+      plot.title = element_text(size = 11, face = "bold", hjust = 0),
+      plot.subtitle = element_text(size = 10, color = "black", hjust = 0),
+      axis.title = element_text(size = 10, face = "plain"),
+      axis.text = element_text(size = 9, color = "black"),
+      axis.line = element_line(color = "black", size = 0.3),
+      axis.ticks = element_line(color = "black", size = 0.3),
+      panel.grid.major = element_line(color = "#E5E5E5", size = 0.2),
+      panel.grid.minor = element_blank(),
+      legend.title = element_text(size = 9, face = "bold"),
+      legend.text = element_text(size = 8),
+      legend.position = "right",
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      strip.text = element_text(size = 9, face = "bold"),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+}
+
+# ============================================================================
+# PANEL A: SHAP ANALYSIS (FILTERED)
+# ============================================================================
+
+cat("Creating SHAP plot with filtered features...\n")
+
+# Calculate SHAP values if not already done
+if(!exists("shap_values_clean")) {
+  set.seed(123)
+  shap_sample_size <- min(500, nrow(X_test))  # Increased sample for stability
+  shap_idx <- sample(1:nrow(X_test), shap_sample_size)
+  shap_data <- xgb.DMatrix(X_test[shap_idx, ])
+  shap_values <- predict(xgb_final, shap_data, predcontrib = TRUE, approxcontrib = FALSE)
+  shap_values_clean <- shap_values[, -ncol(shap_values)]
+  feature_names <- colnames(X_test)
+}
+
+# Define features to include (exclude therapist/location/program fixed effects)
+include_patterns <- c(
+  # Patient clinical features
+  "^total_score$", "^risk_high_initial$", "^deterrents_month$", 
+  "^what_sort_of_reasons$", "^duration_month$", "^adolescent$", "^male$",
+  "^frequency_month$", "^are_there_things$",
+  "^how_many_times_have_you_had_these_thoughts$",
+  "^when_you_have_the_thoughts_how_long_do_they_last$",
+  "^could_can_you_stop_thinking_about_killing_yourself",
+  
+  # Diagnosis and symptoms
+  "^current_and_past_psychiatric_diagnoses_",
+  "^presenting_symptoms_",
+  "^family_history_",
+  "^precipitants_stressors_",
+  "^internal_protective_factors_",
+  "^external_protective_factors_",
+  "^change_in_treatment_",
+  "^dx_group_",
+  
+  # Therapy features
+  "^act$", "^cbt$", "^dbt$", "^motivational_interviewing$",
+  "^mindfulness$", "^stages_of_change$", "^family_systems$",
+  
+  # Propensity scores
+  "^prop_",
+  
+  # Treatment context (but not provider IDs)
+  "^therapy_duration_category_", "^delivery_method_", "^session_mode_"
+)
+
+# Exclude patterns (therapist/location fixed effects)
+exclude_patterns <- c(
+  "^therapist_name_", "^location_", "^program_", 
+  "^pn_month", "^pn_time_block", "^pn_year",   "^intake_to_pn$", "^days_first_srs$"
+)
+
+# Filter features
+keep_features <- logical(length(feature_names))
+for(i in seq_along(feature_names)) {
+  # Check if feature matches any include pattern
+  include <- any(sapply(include_patterns, function(p) grepl(p, feature_names[i])))
+  # Check if feature matches any exclude pattern
+  exclude <- any(sapply(exclude_patterns, function(p) grepl(p, feature_names[i])))
+  keep_features[i] <- include & !exclude
+}
+
+filtered_features <- feature_names[keep_features]
+cat(sprintf("  Filtered to %d features from %d total\n", 
+            length(filtered_features), length(feature_names)))
+
+# Calculate importance for filtered features only
+filtered_shap <- shap_values_clean[, keep_features]
+mean_abs_shap <- colMeans(abs(filtered_shap))
+names(mean_abs_shap) <- filtered_features
+
+# Get top 20 features
+top_features <- names(sort(mean_abs_shap, decreasing = TRUE)[1:20])
+
+# Create data for plot
+shap_plot_data <- data.frame()
+for(feat in top_features) {
+  feat_idx <- which(feature_names == feat)
+  shap_plot_data <- rbind(shap_plot_data,
+                          data.frame(
+                            feature = feat,
+                            feature_value = X_test[shap_idx, feat_idx],
+                            shap_value = shap_values_clean[, feat_idx]
+                          ))
+}
+
+# Create clean feature labels
+shap_plot_data$feature_clean <- case_when(
+  # Core clinical features
+  shap_plot_data$feature == "total_score" ~ "Total symptom score",
+  shap_plot_data$feature == "risk_high_initial" ~ "High risk at intake",
+  shap_plot_data$feature == "days_first_srs" ~ "Days to reassessment",
+  shap_plot_data$feature == "intake_to_pn" ~ "Days to first therapy",
+  shap_plot_data$feature == "adolescent" ~ "Adolescent",
+  shap_plot_data$feature == "male" ~ "Male sex",
+  
+  # C-SSRS items
+  shap_plot_data$feature == "frequency_month" ~ "SI frequency (past month)",
+  shap_plot_data$feature == "duration_month" ~ "SI duration (past month)",
+  shap_plot_data$feature == "deterrents_month" ~ "Deterrents present",
+  shap_plot_data$feature == "are_there_things" ~ "Protective factors",
+  
+  # Therapies
+  shap_plot_data$feature == "cbt" ~ "CBT received",
+  shap_plot_data$feature == "dbt" ~ "DBT received",
+  shap_plot_data$feature == "act" ~ "ACT received",
+  shap_plot_data$feature == "motivational_interviewing" ~ "MI received",
+  shap_plot_data$feature == "mindfulness" ~ "Mindfulness received",
+  shap_plot_data$feature == "family_systems" ~ "Family therapy received",
+  shap_plot_data$feature == "stages_of_change" ~ "Stages of change received",
+  
+  # Propensity scores
+  grepl("^prop_cbt", shap_plot_data$feature) ~ "Propensity: CBT",
+  grepl("^prop_dbt", shap_plot_data$feature) ~ "Propensity: DBT",
+  grepl("^prop_act", shap_plot_data$feature) ~ "Propensity: ACT",
+  grepl("^prop_mi", shap_plot_data$feature) ~ "Propensity: MI",
+  grepl("^prop_mindfulness", shap_plot_data$feature) ~ "Propensity: Mindfulness",
+  grepl("^prop_family", shap_plot_data$feature) ~ "Propensity: Family",
+  
+  # Diagnoses
+  grepl("depression", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: Depression",
+  grepl("anxiety", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: Anxiety",
+  grepl("bipolar", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: Bipolar",
+  grepl("ptsd|trauma", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: PTSD/Trauma",
+  
+  # Symptoms
+  grepl("presenting_symptoms_", shap_plot_data$feature) ~ 
+    gsub("presenting_symptoms_", "Symptom: ", shap_plot_data$feature),
+  
+  # Default
+  TRUE ~ gsub("_", " ", shap_plot_data$feature)
+)
+
+# Order by mean absolute SHAP
+
+
+# Normalize feature values for coloring (0-1 scale)
+shap_plot_data <- shap_plot_data %>%
+  group_by(feature) %>%
+  mutate(feature_value_norm = (feature_value - min(feature_value, na.rm = TRUE)) /
+           (max(feature_value, na.rm = TRUE) - min(feature_value, na.rm = TRUE) + 1e-10))
+
+# Create clean feature labels for SHAP plot
+shap_plot_data$feature_clean <- case_when(
+  # Risk and severity measures
+  shap_plot_data$feature == "risk_high_initial" ~ "High risk at intake",
+  shap_plot_data$feature == "total_score" ~ "C-SSRS total score",
+  
+  # C-SSRS specific items about suicidal ideation
+  shap_plot_data$feature == "how_many_times_have_you_had_these_thoughts" ~ "Suicidal Ideation frequency (times)",
+  shap_plot_data$feature == "frequency_month" ~ "Suicidal ideation frequency (past month)",
+  shap_plot_data$feature == "duration_month" ~ "Suicidal ideation duration (past month)",
+  shap_plot_data$feature == "deterrents_month" ~ "Deterrents present",
+  shap_plot_data$feature == "could_can_you_stop_thinking_about_killing_yourself_or_wanting_to_die_if_you_want_to" ~ "Suicidal ideation controllability",
+  
+  # Protective factors (internal)
+  shap_plot_data$feature == "internal_protective_factors_identifies_reasons_for_living" ~ "Identifies reasons for living",
+  shap_plot_data$feature == "internal_protective_factors_ability_to_cope_with_stress" ~ "Ability to cope with stress",
+  shap_plot_data$feature == "internal_protective_factors_able_to_access_care_willing_to_reach_out" ~ "Willing to seek help",
+  shap_plot_data$feature == "internal_protective_factors_fear_of_death_or_the_actual_act_of_killing_self" ~ "Fear of death/dying",
+  
+  # Risk factors/stressors
+  shap_plot_data$feature == "precipitants_stressors_social_isolation" ~ "Socially isolated",
+  shap_plot_data$feature == "precipitants_stressors_inadequate_social_supports" ~ "Inadequate social support",
+  
+  # Treatment received
+  shap_plot_data$feature == "stages_of_change" ~ "Stages of Change (received)",
+  
+  # Propensity scores (likelihood of receiving each therapy)
+  shap_plot_data$feature == "prop_act" ~ "Propensity to recieve ACT",
+  shap_plot_data$feature == "prop_dbt" ~ "Propensity to recieve DBT",
+  shap_plot_data$feature == "prop_mi" ~ "Propensity to recieve Motivational Interviewing",
+  shap_plot_data$feature == "prop_mindfulness" ~ "Propensity to recieve Mindfulness",
+  shap_plot_data$feature == "prop_family_systems" ~ "Propensity to recieve Family therapy",
+  shap_plot_data$feature == "prop_stages_of_change" ~ "Propensity to recieve Stages of Change",
+  
+  # Default
+  TRUE ~ shap_plot_data$feature
+)
+
+feature_order <- shap_plot_data %>%
+  group_by(feature_clean) %>%
+  summarise(mean_abs = mean(abs(shap_value))) %>%
+  arrange(desc(mean_abs))
+
+shap_plot_data$feature_clean <- factor(shap_plot_data$feature_clean,
+                                       levels = rev(feature_order$feature_clean))
+
+# Create SHAP plot
+panel_a <- ggplot(shap_plot_data, aes(x = shap_value, y = feature_clean)) +
+  geom_jitter(aes(color = feature_value_norm),
+              height = 0.15, width = 0, size = 0.8, alpha = 0.7) +
+  scale_color_gradient2(low = "#0066CC", mid = "#F4F4F4", high = "#CC0000",
+                        midpoint = 0.5,
+                        name = "Feature\nvalue\n",
+                        breaks = c(0, 0.999),
+                        labels = c("Low",  "High")) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "#666666", size = 0.3) +
+  labs(
+    title = "A. Feature importance for improvement prediction",
+    subtitle = "SHAP values quantify impact on predicted probability",
+    x = "SHAP value (impact on prediction)",
+    y = NULL
+  ) +
+  theme_publication() +
+  theme(
+    legend.position = c(0.85, 0.4),
+    legend.background = element_rect(fill = "white", color = "#CCCCCC", size = 0.3),
+    legend.key.size = unit(0.4, "cm"),
+    axis.text.y = element_text(size = 8)
+  )
+panel_a
+# ============================================================================
+# PANEL B: DOUBLY ROBUST ESTIMATION
+# ============================================================================
+
+cat("Creating doubly robust estimation plot...\n")
+
+if(length(dr_results) > 0) {
+  # Create data frame from results
+  dr_df <- data.frame(
+    therapy = names(dr_results),
+    ate = sapply(dr_results, function(x) x$ate),
+    ci_lower = sapply(dr_results, function(x) x$ci_lower),
+    ci_upper = sapply(dr_results, function(x) x$ci_upper),
+    se = sapply(dr_results, function(x) x$se),
+    n_treated = sapply(dr_results, function(x) x$n_treated)
+  )
+  
+  # Clean therapy names
+  dr_df$therapy_clean <- case_when(
+    dr_df$therapy == "cbt" ~ "CBT",
+    dr_df$therapy == "dbt" ~ "DBT",
+    dr_df$therapy == "act" ~ "ACT",
+    dr_df$therapy == "motivational_interviewing" ~ "Motivational Interviewing",
+    dr_df$therapy == "mindfulness" ~ "Mindfulness",
+    dr_df$therapy == "stages_of_change" ~ "Stages of Change",
+    dr_df$therapy == "family_systems" ~ "Family Systems",
+    TRUE ~ dr_df$therapy
+  )
+  
+  # Add significance stars
+  dr_df$sig <- case_when(
+    abs(dr_df$ate) / dr_df$se > 2.58 ~ "***",  # p < 0.01
+    abs(dr_df$ate) / dr_df$se > 1.96 ~ "**",   # p < 0.05
+    abs(dr_df$ate) / dr_df$se > 1.64 ~ "*",    # p < 0.10
+    TRUE ~ ""
+  )
+  
+  # Order by effect size
+  dr_df <- dr_df %>% arrange(ate)
+  dr_df$therapy_clean <- factor(dr_df$therapy_clean, levels = dr_df$therapy_clean)
+  
+  # Create forest plot
+  panel_b <- ggplot(dr_df, aes(x = therapy_clean, y = ate * 100)) +
+    geom_hline(yintercept = 0, linetype = "solid", color = "#666666", size = 0.3) +
+    geom_errorbar(aes(ymin = ci_lower * 100, ymax = ci_upper * 100),
+                  width = 0, size = 0.4, color = "#333333") +
+    geom_point(aes(fill = ate > 0), shape = 21, size = 3.5, 
+               color = "#333333", stroke = 0.5) +
+    scale_fill_manual(values = c("FALSE" = "#009900", "TRUE" = "#009900"),
+                      guide = "none") +
+    coord_flip() +
+    labs(
+      title = "B. Therapy-specific associations with improvement",
+      subtitle = "Doubly robust estimates accounting for selection bias",
+      x = NULL,
+      y = "Difference in improvement probability (percentage points)"
+    ) +
+    theme_publication() +
+    theme(
+      axis.text.y = element_text(size = 9)
+    ) }
+
+panel_b
+# ============================================================================
+# COMBINE PANELS
+# ============================================================================
+
+cat("Combining panels into publication figure...\n")
+
+# Combine plots using cowplot
+figure <- plot_grid(
+  panel_a, panel_b,
+  ncol = 1,
+  rel_widths = c(1, 1),
+  align = "h",
+  axis = "tb"
+)
+
+# Save figure
+ggsave("figure_combined_shap_dr.pdf", 
+       figure, 
+       width = 12, 
+       height = 6, 
+       dpi = 300,
+       device = cairo_pdf)
+
+ggsave("figure_combined_shap_dr.png", 
+       figure, 
+       width = 12, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+ggsave("figure_combined_shap_dr.tiff", 
+       figure, 
+       width = 12, 
+       height = 6, 
+       dpi = 300,
+       compression = "lzw",
+       bg = "white")
+
+cat("\nFigure saved as:\n")
+cat("  - figure_combined_shap_dr.pdf (for submission)\n")
+cat("  - figure_combined_shap_dr.png (for review)\n")
+cat("  - figure_combined_shap_dr.tiff (if journal requires)\n")
+
+# Print summary statistics for caption
+cat(sprintf("Figure X. Machine learning model insights for suicide risk improvement prediction.\n"))
+cat(sprintf("(A) SHAP (SHapley Additive exPlanations) values for top 20 predictive features,\n"))
+cat(sprintf("excluding provider fixed effects. Points represent individual patients (n=%d),\n", shap_sample_size))
+cat(sprintf("with color indicating normalized feature values. Positive SHAP values indicate\n"))
+cat(sprintf("features that increase improvement probability. (B) Therapy-specific associations\n"))
+cat(sprintf("with risk improvement from doubly robust estimation, showing percentage point\n"))
+cat(sprintf("differences with 95%% confidence intervals. Green indicates positive associations,\n"))
+cat(sprintf("red indicates negative associations. *p<0.10, **p<0.05, ***p<0.01.\n"))
+
+
+
+
+# First, ensure consistent margins and spacing for both panels
+
+# PANEL A modifications
+panel_a <- ggplot(shap_plot_data, aes(x = shap_value, y = feature_clean)) +
+  geom_jitter(aes(color = feature_value_norm),
+              height = 0.15, width = 0, size = 0.8, alpha = 0.7) +
+  scale_color_gradient2(low = "#0066CC", mid = "#F4F4F4", high = "#CC0000",
+                        midpoint = 0.5,
+                        name = "Feature\nvalue",
+                        breaks = c(0, 0.999),
+                        labels = c("Low", "High")) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "#666666", size = 0.3) +
+  labs(
+    title = "A. Feature importance for improvement prediction",
+    subtitle = "SHAP values quantify impact on predicted probability",
+    x = "SHAP value (impact on prediction)",
+    y = NULL
+  ) +
+  theme_publication() +
+  theme(
+    legend.position = "right",  # Move legend to right side instead of inside plot
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    axis.text.y = element_text(size = 9),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")  # Consistent margins
+  )
+
+# PANEL B modifications
+panel_b <- ggplot(dr_df, aes(x = reorder(therapy_clean, ate), y = ate * 100)) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "#666666", size = 0.3) +
+  geom_errorbar(aes(ymin = ci_lower * 100, ymax = ci_upper * 100),
+                width = 0, size = 0.4, color = "#333333") +
+  geom_point(aes(fill = ate > 0), shape = 21, size = 3.5, 
+             color = "#333333", stroke = 0.5) +
+  scale_fill_manual(values = c("FALSE" = "#009900", "TRUE" = "#009900"),
+                    guide = "none") +
+  coord_flip() +
+  labs(
+    title = "B. Therapy-specific associations with improvement",
+    subtitle = "Doubly robust estimates accounting for selection bias",
+    x = NULL,
+    y = "Difference in improvement probability (percentage points)"
+  ) +
+  theme_publication() +
+  theme(
+    axis.text.y = element_text(size = 9)
+  )
+
+panel_b
+# Combine with better alignment
+library(cowplot)
+figure <- plot_grid(
+  panel_a, 
+  panel_b,
+  ncol = 1,
+  rel_heights = c(1.25, 1),  # Adjust relative heights
+  align = "hv",  # Align both horizontally and vertically
+  axis = "tblr"  # Align all axes
+)
+
+figure
+
+ggsave("fig3.png", figure, width = 8, height = 7, dpi = 300, bg='white')
 
