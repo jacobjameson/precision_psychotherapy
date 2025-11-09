@@ -1,0 +1,376 @@
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(forcats)
+
+# Create dataframe with MGE results
+mge_results <- tribble(
+  ~time, ~outcome, ~coef, ~se, ~significance,
+  # Biomarker measures
+  "Adolescent MGE", "bp_score", 1.062, 0.884, "",
+  "Young Adult MGE", "bp_score", 1.620, 0.881, "*",
+  "Adolescent MGE", "glucose_score", 1.745, 0.843, "**",
+  "Young Adult MGE", "glucose_score", 1.856, 0.796, "**",
+  "Adolescent MGE", "lipid_score", -0.770, 1.235, "",
+  "Young Adult MGE", "lipid_score", 0.531, 1.267, "",
+  "Adolescent MGE", "bmi_score", 3.150, 1.051, "***",
+  "Young Adult MGE", "bmi_score", 1.473, 1.128, "",
+  # Lifestyle factors
+  "Adolescent MGE", "activity_score", 0.123, 0.735, "",
+  "Young Adult MGE", "activity_score", 1.078, 0.744, "",
+  "Adolescent MGE", "diet_score", -1.587, 0.791, "**",
+  "Young Adult MGE", "diet_score", -0.994, 0.738, "",
+  "Adolescent MGE", "smoking_score", -3.257, 0.875, "***",
+  "Young Adult MGE", "smoking_score", -5.761, 0.856, "***",
+  "Adolescent MGE", "sleep_score", -0.500, 0.492, "",
+  "Young Adult MGE", "sleep_score", -0.074, 0.554, "",
+  # Composite measure
+  "Adolescent MGE", "LE8", -0.175, 0.472, "",
+  "Young Adult MGE", "LE8", 0.278, 0.487, ""
+)
+
+# Process data
+mge_results <- mge_results %>%
+  mutate(
+    # Calculate confidence intervals
+    lower = coef - 1.96 * se,
+    upper = coef + 1.96 * se,
+    
+    # Create better labels for outcomes
+    outcome_label = case_when(
+      outcome == "bp_score" ~ "Blood Pressure",
+      outcome == "glucose_score" ~ "Glucose",
+      outcome == "lipid_score" ~ "Lipid",
+      outcome == "bmi_score" ~ "BMI",
+      outcome == "activity_score" ~ "Physical Activity",
+      outcome == "diet_score" ~ "Diet Quality",
+      outcome == "smoking_score" ~ "Smoking",
+      outcome == "sleep_score" ~ "Sleep Quality",
+      outcome == "LE8" ~ "Life's Essential 8",
+      TRUE ~ outcome
+    ),
+    
+    # Create three distinct categories
+    outcome_category = factor(
+      case_when(
+        outcome %in% c("bp_score", "glucose_score", "lipid_score", "bmi_score") ~ "Biomarker \nMeasures",
+        outcome %in% c("activity_score", "diet_score", "smoking_score", "sleep_score") ~ "Lifestyle \nFactors",
+        outcome == "LE8" ~ "Composite \nScore",
+        TRUE ~ "Other"
+      ),
+      levels = c("Biomarker \nMeasures", "Lifestyle \nFactors", "Composite \nScore")
+    ),
+    
+    # Set order for outcomes within categories
+    outcome_order = case_when(
+      outcome == "bp_score" ~ 1,
+      outcome == "glucose_score" ~ 2,
+      outcome == "lipid_score" ~ 3,
+      outcome == "bmi_score" ~ 4,
+      outcome == "activity_score" ~ 5,
+      outcome == "diet_score" ~ 6,
+      outcome == "smoking_score" ~ 7,
+      outcome == "sleep_score" ~ 8,
+      outcome == "LE8" ~ 9,
+      TRUE ~ 10
+    ),
+    
+    # Factor for time with correct order
+    time = factor(time, levels = c("Adolescent MGE", "Young Adult MGE"))
+  ) %>%
+  arrange(outcome_order)
+
+# Create custom color palette
+time_colors <- c("Adolescent MGE" = "#2166AC", "Young Adult MGE" = "#D6604D")
+
+# Clean faceted plot
+p_clean <- ggplot(mge_results, aes(x = fct_reorder(outcome_label, outcome_order), 
+                                   y = coef, color = time)) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "gray40", alpha = 0.4) +
+  geom_errorbar(aes(ymin = lower, ymax = upper),
+                width = 0.15,
+                position = position_dodge(width = 0.5),
+                size = 0.7,
+                alpha = 0.8) +
+  geom_point(position = position_dodge(width = 0.5),
+             size = 3) +
+  facet_grid(outcome_category ~ ., scales = "free_y", space = "free_y") +
+  coord_flip() +
+  scale_color_manual(values = time_colors,
+                     name = "") +
+  labs(
+    title = "Male Gender Expression on LE8 Outcomes in Men",
+    x = NULL,
+    y = "MGE Coefficient (95% CI)",
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "gray40", hjust = 0),
+    plot.caption = element_text(size = 9, color = "gray50", hjust = 0),
+    strip.text.y = element_text(size = 11, face = "bold", angle = 0),
+    strip.background = element_rect(fill = "gray94", color = NA),
+    panel.spacing = unit(1.2, "lines"),
+    legend.position = "top",
+    axis.text.y = element_text(hjust = 1),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", size = 0.4)
+  )
+
+print(p_clean)
+
+# Save the p
+
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(forcats)
+library(patchwork)
+
+# Create dataframe with BOTH main effects and interaction terms for Marital Status model
+mge_marital_full <- tribble(
+  ~effect_type, ~time, ~outcome, ~coef, ~se,
+  
+  # MAIN MGE EFFECTS (effect for married men - reference group)
+  # Biomarkers
+  "Main MGE Effect\n(Married men)", "Adolescent", "bp_score", 1.450, 1.149,
+  "Main MGE Effect\n(Married men)", "Young Adult", "bp_score", -0.293, 1.006,
+  "Main MGE Effect\n(Married men)", "Adolescent", "glucose_score", 2.157, 1.194,
+  "Main MGE Effect\n(Married men)", "Young Adult", "glucose_score", 2.105, 0.910,
+  "Main MGE Effect\n(Married men)", "Adolescent", "lipid_score", -0.173, 1.408,
+  "Main MGE Effect\n(Married men)", "Young Adult", "lipid_score", -0.613, 1.430,
+  "Main MGE Effect\n(Married men)", "Adolescent", "bmi_score", 4.865, 1.440,
+  "Main MGE Effect\n(Married men)", "Young Adult", "bmi_score", -0.582, 1.363,
+  # Lifestyle
+  "Main MGE Effect\n(Married men)", "Adolescent", "activity_score", -1.150, 0.870,
+  "Main MGE Effect\n(Married men)", "Young Adult", "activity_score", 1.263, 0.935,
+  "Main MGE Effect\n(Married men)", "Adolescent", "diet_score", -1.950, 0.903,
+  "Main MGE Effect\n(Married men)", "Young Adult", "diet_score", -0.794, 0.928,
+  "Main MGE Effect\n(Married men)", "Adolescent", "smoking_score", -2.385, 1.135,
+  "Main MGE Effect\n(Married men)", "Young Adult", "smoking_score", -5.389, 1.115,
+  "Main MGE Effect\n(Married men)", "Adolescent", "sleep_score", 0.111, 0.574,
+  "Main MGE Effect\n(Married men)", "Young Adult", "sleep_score", -0.285, 0.690,
+  # Composite
+  "Main MGE Effect\n(Married men)", "Adolescent", "LE8", 0.314, 0.667,
+  "Main MGE Effect\n(Married men)", "Young Adult", "LE8", 0.019, 0.625,
+  
+  # INTERACTION TERMS (additional effect for unmarried men)
+  # Biomarkers
+  "Interaction\n(Not Married × MGE)", "Adolescent", "bp_score", -0.869, 1.808,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "bp_score", 4.662, 1.873,
+  "Interaction\n(Not Married × MGE)", "Adolescent", "glucose_score", -0.955, 1.390,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "glucose_score", -0.614, 1.608,
+  "Interaction\n(Not Married × MGE)", "Adolescent", "lipid_score", -1.382, 2.116,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "lipid_score", 2.801, 2.250,
+  "Interaction\n(Not Married × MGE)", "Adolescent", "bmi_score", -3.901, 2.479,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "bmi_score", 5.054, 2.084,
+  # Lifestyle
+  "Interaction\n(Not Married × MGE)", "Adolescent", "activity_score", 2.962, 1.705,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "activity_score", -0.446, 1.591,
+  "Interaction\n(Not Married × MGE)", "Adolescent", "diet_score", 0.839, 1.449,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "diet_score", -0.481, 1.435,
+  "Interaction\n(Not Married × MGE)", "Adolescent", "smoking_score", -1.970, 1.854,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "smoking_score", -0.881, 1.999,
+  "Interaction\n(Not Married × MGE)", "Adolescent", "sleep_score", -1.415, 1.024,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "sleep_score", 0.507, 1.202,
+  # Composite
+  "Interaction\n(Not Married × MGE)", "Adolescent", "LE8", -1.135, 1.218,
+  "Interaction\n(Not Married × MGE)", "Young Adult", "LE8", 0.648, 1.119
+)
+
+# Process data
+mge_marital_full <- mge_marital_full %>%
+  mutate(
+    # Calculate confidence intervals
+    lower = coef - 1.96 * se,
+    upper = coef + 1.96 * se,
+    
+    # Create better labels for outcomes
+    outcome_label = case_when(
+      outcome == "bp_score" ~ "Blood Pressure",
+      outcome == "glucose_score" ~ "Glucose",
+      outcome == "lipid_score" ~ "Lipid",
+      outcome == "bmi_score" ~ "BMI",
+      outcome == "activity_score" ~ "Physical Activity",
+      outcome == "diet_score" ~ "Diet Quality",
+      outcome == "smoking_score" ~ "Smoking",
+      outcome == "sleep_score" ~ "Sleep Quality",
+      outcome == "LE8" ~ "Life's Essential 8",
+      TRUE ~ outcome
+    ),
+    
+    # Create three distinct categories
+    outcome_category = factor(
+      case_when(
+        outcome %in% c("bp_score", "glucose_score", "lipid_score", "bmi_score") ~ "Biomarker \nMeasures",
+        outcome %in% c("activity_score", "diet_score", "smoking_score", "sleep_score") ~ "Lifestyle \nFactors",
+        outcome == "LE8" ~ "Composite \nScore",
+        TRUE ~ "Other"
+      ),
+      levels = c("Biomarker \nMeasures", "Lifestyle \nFactors", "Composite \nScore")
+    ),
+    
+    # Set order for outcomes
+    outcome_order = case_when(
+      outcome == "bp_score" ~ 1,
+      outcome == "glucose_score" ~ 2,
+      outcome == "lipid_score" ~ 3,
+      outcome == "bmi_score" ~ 4,
+      outcome == "activity_score" ~ 5,
+      outcome == "diet_score" ~ 6,
+      outcome == "smoking_score" ~ 7,
+      outcome == "sleep_score" ~ 8,
+      outcome == "LE8" ~ 9,
+      TRUE ~ 10
+    ),
+    
+    # Factor for time
+    time = factor(time, levels = c("Adolescent", "Young Adult")),
+    
+    # Factor for effect type
+    effect_type = factor(effect_type, 
+                         levels = c("Main MGE Effect\n(Married men)", 
+                                    "Interaction\n(Not Married × MGE)"))
+  )
+
+# Create custom color palette
+time_colors <- c("Adolescent" = "#2166AC", "Young Adult" = "#D6604D")
+
+# Main plot showing both effects side by side
+p_marital_both <- ggplot(mge_marital_full, 
+                         aes(x = fct_reorder(outcome_label, outcome_order),
+                             y = coef, color = time)) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "gray40", alpha = 0.4) +
+  geom_errorbar(aes(ymin = lower, ymax = upper),
+                width = 0.15,
+                position = position_dodge(width = 0.5),
+                size = 0.7,
+                alpha = 0.8) +
+  geom_point(position = position_dodge(width = 0.5),
+             size = 3) +
+  facet_grid(outcome_category ~ effect_type, scales = "free_y", space = "free_y") +
+  coord_flip() +
+  scale_color_manual(values = time_colors,
+                     name = "") +
+  labs(
+    title = "Marital Status Model: Main MGE Effects and Interactions",
+    subtitle = "Left panel: MGE effect for married men (reference) | Right panel: Additional MGE effect for unmarried men",
+    x = NULL,
+    y = "Coefficient (95% CI)"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0),
+    plot.subtitle = element_text(size = 10, color = "gray40", hjust = 0),
+    strip.text.y = element_text(size = 10, face = "bold", angle = 0),
+    strip.text.x = element_text(size = 10, face = "bold"),
+    strip.background = element_rect(fill = "gray94", color = NA),
+    panel.spacing.x = unit(1, "lines"),
+    panel.spacing.y = unit(1, "lines"),
+    legend.position = "top",
+    axis.text.y = element_text(hjust = 1, size = 9),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", size = 0.3)
+  )
+
+print(p_marital_both)
+
+# Calculate TOTAL EFFECT for unmarried men (main + interaction)
+mge_total_unmarried <- mge_marital_full %>%
+  select(-lower, -upper) %>%
+  pivot_wider(names_from = effect_type, values_from = c(coef, se)) %>%
+  mutate(
+    total_coef_unmarried = `coef_Main MGE Effect\n(Married men)` + `coef_Interaction\n(Not Married × MGE)`,
+    # For standard error of sum, use sqrt(se1^2 + se2^2) assuming independence
+    total_se_unmarried = sqrt(`se_Main MGE Effect\n(Married men)`^2 + `se_Interaction\n(Not Married × MGE)`^2),
+    lower_unmarried = total_coef_unmarried - 1.96 * total_se_unmarried,
+    upper_unmarried = total_coef_unmarried + 1.96 * total_se_unmarried
+  )
+
+# Create comparison plot: Married vs Unmarried total effects
+comparison_data <- bind_rows(
+  mge_marital_full %>%
+    filter(effect_type == "Main MGE Effect\n(Married men)") %>%
+    mutate(group = "Married"),
+  mge_total_unmarried %>%
+    mutate(
+      group = "Unmarried",
+      coef = total_coef_unmarried,
+      se = total_se_unmarried,
+      lower = lower_unmarried,
+      upper = upper_unmarried
+    ) %>%
+    select(time, outcome, outcome_label, outcome_category, outcome_order, 
+           group, coef, se, lower, upper)
+)
+
+p_comparison <- ggplot(comparison_data, 
+                       aes(x = fct_reorder(outcome_label, outcome_order),
+                           y = coef, color = interaction(time, group))) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "gray40", alpha = 0.4) +
+  geom_errorbar(aes(ymin = lower, ymax = upper),
+                width = 0.15,
+                position = position_dodge(width = 0.6),
+                size = 0.6,
+                alpha = 0.7) +
+  geom_point(position = position_dodge(width = 0.6),
+             size = 2.5) +
+  facet_grid(outcome_category ~ ., scales = "free_y", space = "free_y") +
+  coord_flip() +
+  scale_color_manual(values = c(
+    "Adolescent.Married" = "#2166AC",
+    "Young Adult.Married" = "#D6604D",
+    "Adolescent.Unmarried" = "#7FCDBB",
+    "Young Adult.Unmarried" = "#FD8D3C"
+  ),
+  labels = c("Adolescent - Married", "Young Adult - Married",
+             "Adolescent - Unmarried", "Young Adult - Unmarried"),
+  name = "") +
+  labs(
+    title = "Total MGE Effects by Marital Status",
+    subtitle = "Comparing total MGE associations for married vs unmarried men",
+    x = NULL,
+    y = "Total MGE Effect (95% CI)",
+    caption = "Note: Unmarried = Main effect + Interaction term"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0),
+    plot.subtitle = element_text(size = 10, color = "gray40", hjust = 0),
+    plot.caption = element_text(size = 9, color = "gray50", hjust = 0),
+    strip.text.y = element_text(size = 10, face = "bold", angle = 0),
+    strip.background = element_rect(fill = "gray94", color = NA),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "top",
+    axis.text.y = element_text(hjust = 1),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", size = 0.4)
+  )
+
+print(p_comparison)
+ggsave("mge_marital_total_effects.png", p_comparison, width = 10, height = 9, dpi = 300)
+
+# Create summary table
+summary_table <- mge_total_unmarried %>%
+  select(time, outcome_label, 
+         married_effect = `coef_Main MGE Effect\n(Married men)`,
+         interaction = `coef_Interaction\n(Not Married × MGE)`,
+         total_unmarried = total_coef_unmarried) %>%
+  mutate(across(c(married_effect, interaction, total_unmarried), ~round(., 2))) %>%
+  arrange(time, outcome_label)
+
+print("Summary of Marital Status Model Effects:")
+print("Main Effect = MGE effect for married men")
+print("Interaction = Additional effect for unmarried men") 
+print("Total Unmarried = Main + Interaction")
+print(summary_table, n = Inf)
+
+write.csv(summary_table, "mge_marital_summary.csv", row.names = FALSE)

@@ -1,0 +1,53 @@
+
+==========================================================================================
+TABLE 2: MODEL DISCRIMINATION (AUROC)
+==========================================================================================
+           Therapy Baseline_Rate Patient_AUC Therapist_AUC Combined_AUC
+1              ACT         0.083       0.600         0.715        0.722
+2              CBT         0.381       0.522         0.742        0.739
+3              DBT         0.172       0.556         0.729        0.739
+4               MI         0.636       0.516         0.738        0.750
+5      Mindfulness         0.174       0.549         0.699        0.696
+6 Stages of Change         0.270       0.495         0.746        0.741
+7   Family Systems         0.174       0.592         0.719        0.722
+  Delta_AUC_T_vs_P DeLong_p
+1            0.116    0.003
+2            0.220    0.000
+3            0.173    0.000
+4            0.223    0.000
+5            0.150    0.000
+6            0.250    0.000
+7            0.127    0.000
+
+==========================================================================================
+AGGREGATE STATISTICS
+==========================================================================================
+
+1. Mean AUC Performance:
+   Patient features:  0.547 (SD = 0.039, range: 0.495-0.600)
+   Therapist factors: 0.727 (SD = 0.017, range: 0.699-0.746)
+   Combined model:    0.730 (SD = 0.018, range: 0.696-0.750)
+   Mean difference (T-P): 0.180 (95% CI: 0.117 to 0.246)
+   Paired t-test: t(6) = 9.14, p = 0.0001
+
+2. Statistical Significance:
+   Therapies where therapist > patient (p < .05): 7/7 (100%)
+   Median DeLong Z-statistic: 5.71
+
+3. Therapies with Largest Therapist Advantage:
+   Stages of Change: Δ AUC = 0.250 (p = 0.0000)
+   MI: Δ AUC = 0.223 (p = 0.0000)
+   CBT: Δ AUC = 0.220 (p = 0.0000)
+   DBT: Δ AUC = 0.173 (p = 0.0000)
+   Mindfulness: Δ AUC = 0.150 (p = 0.0000)
+   Family Systems: Δ AUC = 0.127 (p = 0.0000)
+   ACT: Δ AUC = 0.116 (p = 0.0031)
+
+4. Incremental Value:
+   Adding therapist to patient: Δ AUC = 0.183
+   Adding patient to therapist: Δ AUC = 0.003
+
+5. Model Calibration (Brier Score - lower is better):
+   Patient features:  0.247
+   Therapist factors: 0.204
+   Combined model:    0.202
