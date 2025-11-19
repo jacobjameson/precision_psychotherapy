@@ -33,7 +33,7 @@ source('src/propensity_scores.R')
 source('src/figure_2.R')
 
 # Train XGBoost
-source('src/XGBoost.R')
+source('src/AIPW XGBoost.R')
 
 # Generate Figure 3
 source('src/figure_3.R')

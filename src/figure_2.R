@@ -126,3 +126,13 @@ ggsave(
   dpi = 300,
   bg = "white"
 )
+ggsave(
+  "outputs/figures/figure2.pdf",
+  combined_plot,
+  width = 13,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
+
+

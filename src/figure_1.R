@@ -30,8 +30,8 @@ total_patients <- nrow(upset_data)
 
 
 # Save as high-res PNG
-png("outputs/figures/figure1.png", 
-    width = 10, height = 4, units = "in", res = 300)
+pdf("outputs/figures/figure1.pdf", 
+    width = 10, height = 4)
 
 UpSet(
   m, 

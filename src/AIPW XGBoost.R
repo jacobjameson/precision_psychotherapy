@@ -1,17 +1,19 @@
 # ============================================================================
-# COMPLETE ANALYSIS PIPELINE: THERAPY OPTIMIZATION FOR SUICIDE RISK REDUCTION
+# COMPLETE ANALYSIS PIPELINE: THERAPY OPTIMIZATION WITH AIPW WEIGHTING
 # ============================================================================
 # This script performs:
 # 1. Data preparation and outcome creation
-# 2. Feature engineering and selection
-# 3. Temporal train-test splitting
-# 4. Hyperparameter tuning with cross-validation
-# 5. XGBoost model training with optimized parameters
-# 6. SHAP analysis for interpretability
-# 7. Doubly robust estimation for therapy associations
-# 8. Counterfactual analysis for personalization gains
-# 9. Comprehensive visualizations
-# 10. Results export for manuscript
+# 2. Feature engineering and selection (WITHOUT propensity scores as features)
+# 3. AIPW weight construction for multiple therapies
+# 4. Temporal train-test splitting
+# 5. Hyperparameter tuning with weighted cross-validation
+# 6. Weighted XGBoost model training with optimized parameters
+# 7. Standard predictive performance metrics (AUC, Brier, etc.)
+# 8. SHAP analysis for interpretability
+# 9. Doubly robust estimation for therapy associations
+# 10. Counterfactual analysis for personalization gains
+# 11. Comprehensive visualizations
+# 12. Results export for manuscript
 # ============================================================================
 # Set seed for reproducibility
 set.seed(123)
@@ -26,16 +28,24 @@ risk_transitions <- data %>%
   count(risk_level_initial, risk_level_srs_first) %>%
   arrange(risk_level_initial, risk_level_srs_first)
 
-cat("\nRisk transitions:\n")
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("RISK TRANSITIONS\n")
+cat(rep("=", 90), "\n", sep="")
 print(risk_transitions)
 
 # ============================================================================
-# FEATURE ENGINEERING
+# FEATURE ENGINEERING (EXCLUDING PROPENSITY SCORES)
 # ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("FEATURE ENGINEERING\n")
+cat(rep("=", 90), "\n", sep="")
 
 # Patient clinical features (baseline)
 patient_clinical_features <- c(
-  "total_score", "risk_high_initial", "deterrents_month", "what_sort_of_reasons",
+  "total_score", "risk_high_initial", 'days_first_srs', "deterrents_month", "what_sort_of_reasons",
   "duration_month", "adolescent",
   "could_can_you_stop_thinking_about_killing_yourself_or_wanting_to_die_if_you_want_to",
   "are_there_things", "frequency_month", "when_you_have_the_thoughts_how_long_do_they_last",
@@ -52,9 +62,6 @@ patient_clinical_features <- c(
 therapy_features <- c("act", "cbt", "dbt", "motivational_interviewing",
                       "mindfulness", "stages_of_change", "family_systems")
 
-# Therapy propensity scores
-#propensity_features <- names(data)[grepl("^prop_", names(data))]
-
 # Treatment context features
 treatment_context_features <- c("therapy_duration_category", "delivery_method",
                                 "session_mode")
@@ -63,11 +70,9 @@ treatment_context_features <- c("therapy_duration_category", "delivery_method",
 therapist_features <- c("therapist_name", "location", "program",
                         "pn_month", "pn_time_block", "pn_year")
 
-# Combine all features
+# Combine all features (NO propensity scores)
 all_features <- unique(c(patient_clinical_features, therapy_features,
-                         #propensity_features, 
-                         treatment_context_features,
-                         therapist_features))
+                         treatment_context_features, therapist_features))
 
 # Keep only features that exist in data
 all_features <- all_features[all_features %in% names(data)]
@@ -77,8 +82,6 @@ cat(sprintf("  Patient clinical features: %d\n",
             sum(all_features %in% patient_clinical_features)))
 cat(sprintf("  Therapy indicators: %d\n", 
             sum(all_features %in% therapy_features)))
-cat(sprintf("  Propensity scores: %d\n", 
-            sum(all_features %in% propensity_features)))
 cat(sprintf("  Treatment context: %d\n", 
             sum(all_features %in% treatment_context_features)))
 cat(sprintf("  Therapist/organizational: %d\n", 
@@ -88,6 +91,11 @@ cat(sprintf("  Total features: %d\n", length(all_features)))
 # ============================================================================
 # TEMPORAL TRAIN-TEST SPLIT
 # ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("TEMPORAL TRAIN-TEST SPLIT\n")
+cat(rep("=", 90), "\n", sep="")
 
 # Sort by admission date and split
 data <- data %>%
@@ -210,6 +218,11 @@ prepare_matrices <- function(train_df, test_df, features) {
 }
 
 # Create feature matrices
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("PREPARING DATA MATRICES\n")
+cat(rep("=", 90), "\n", sep="")
+
 matrices <- prepare_matrices(train_data, test_data, all_features)
 X_train <- matrices$train
 X_test <- matrices$test
@@ -221,6 +234,7 @@ if(any(is.na(y_train))) {
   keep_idx <- !is.na(y_train)
   X_train <- X_train[keep_idx, ]
   y_train <- y_train[keep_idx]
+  train_data <- train_data[keep_idx, ]
   cat(sprintf("  Removed %d training rows with NA outcomes\n", sum(!keep_idx)))
 }
 
@@ -228,6 +242,7 @@ if(any(is.na(y_test))) {
   keep_idx <- !is.na(y_test)
   X_test <- X_test[keep_idx, ]
   y_test <- y_test[keep_idx]
+  test_data <- test_data[keep_idx, ]
   cat(sprintf("  Removed %d test rows with NA outcomes\n", sum(!keep_idx)))
 }
 
@@ -236,17 +251,138 @@ cat(sprintf("  X_train: %d rows x %d columns\n", nrow(X_train), ncol(X_train)))
 cat(sprintf("  X_test: %d rows x %d columns\n", nrow(X_test), ncol(X_test)))
 
 # ============================================================================
-# HYPERPARAMETER TUNING WITH TEMPORAL CROSS-VALIDATION
+# CONSTRUCT AIPW WEIGHTS
 # ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("CONSTRUCTING AIPW WEIGHTS\n")
+cat(rep("=", 90), "\n", sep="")
+
+# Mapping between therapy columns and propensity columns
+therapy_to_prop <- c(
+  "act" = "prop_act",
+  "cbt" = "prop_cbt", 
+  "dbt" = "prop_dbt",
+  "motivational_interviewing" = "prop_mi",
+  "mindfulness" = "prop_mindfulness",
+  "stages_of_change" = "prop_stages_of_change",
+  "family_systems" = "prop_family_systems"
+)
+
+# Identify available therapy columns in the feature matrix
+therapy_cols_in_data <- therapy_features[therapy_features %in% colnames(X_train)]
+cat(sprintf("  Found %d therapy modalities in data\n", length(therapy_cols_in_data)))
+
+# Function to create stabilized AIPW weights for multiple treatments
+create_aipw_weights <- function(X_matrix, df_with_props, therapy_cols, therapy_to_prop_map) {
+  n <- nrow(X_matrix)
+  weights <- rep(1, n)
+  
+  weight_components <- data.frame(row = 1:n)
+  
+  for(therapy in therapy_cols) {
+    prop_col <- therapy_to_prop_map[therapy]
+    
+    if(!is.na(prop_col) && prop_col %in% names(df_with_props)) {
+      # Get treatment indicator from feature matrix
+      T_i <- X_matrix[, therapy]
+      
+      # Get propensity score
+      e_i <- df_with_props[[prop_col]]
+      
+      # Bound propensity scores away from 0 and 1
+      e_i <- pmax(0.01, pmin(0.99, e_i))
+      
+      # Marginal probability (for stabilization)
+      p_t <- mean(T_i, na.rm = TRUE)
+      
+      # Stabilized weight for this therapy
+      # w_i = (T_i * p_t / e_i) + ((1 - T_i) * (1 - p_t) / (1 - e_i))
+      w_i <- ifelse(T_i == 1, 
+                    p_t / e_i,
+                    (1 - p_t) / (1 - e_i))
+      
+      # Multiply weights (for joint treatment)
+      weights <- weights * w_i
+      
+      # Store component for diagnostics
+      weight_components[[paste0("w_", therapy)]] <- w_i
+      
+      cat(sprintf("    %s: propensity range [%.3f, %.3f], treatment rate = %.1f%%\n",
+                  therapy, min(e_i), max(e_i), p_t * 100))
+    }
+  }
+  
+  # Normalize weights to have mean = 1 (for interpretability)
+  weights <- weights / mean(weights)
+  
+  # Diagnostic statistics
+  cat(sprintf("\n  Weight statistics:\n"))
+  cat(sprintf("    Mean: %.3f (by design after normalization)\n", mean(weights)))
+  cat(sprintf("    Median: %.3f\n", median(weights)))
+  cat(sprintf("    Range: [%.3f, %.3f]\n", min(weights), max(weights)))
+  cat(sprintf("    SD: %.3f\n", sd(weights)))
+  cat(sprintf("    IQR: [%.3f, %.3f]\n", 
+              quantile(weights, 0.25), quantile(weights, 0.75)))
+  
+  # Check for extreme weights
+  n_extreme <- sum(weights > quantile(weights, 0.99))
+  if(n_extreme > 0) {
+    cat(sprintf("    ⚠ Warning: %d observations (%.1f%%) have weights > 99th percentile\n",
+                n_extreme, n_extreme / length(weights) * 100))
+  }
+  
+  # Optionally trim extreme weights
+  max_weight <- quantile(weights, 0.99)
+  weights_trimmed <- pmin(weights, max_weight)
+  n_trimmed <- sum(weights != weights_trimmed)
+  if(n_trimmed > 0) {
+    cat(sprintf("    Trimmed %d weights at 99th percentile (%.3f)\n", 
+                n_trimmed, max_weight))
+  }
+  
+  return(list(
+    weights = weights_trimmed,
+    weights_untrimmed = weights,
+    components = weight_components
+  ))
+}
+
+# Create weights for training set
+train_weights_result <- create_aipw_weights(
+  X_train, 
+  train_data, 
+  therapy_cols_in_data, 
+  therapy_to_prop
+)
+train_weights <- train_weights_result$weights
+
+# For test set, we don't use weights (standard prediction)
+# But create them for diagnostic purposes
+test_weights_result <- create_aipw_weights(
+  X_test, 
+  test_data, 
+  therapy_cols_in_data, 
+  therapy_to_prop
+)
+test_weights <- test_weights_result$weights
+
+# ============================================================================
+# HYPERPARAMETER TUNING WITH WEIGHTED TEMPORAL CROSS-VALIDATION
+# ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("HYPERPARAMETER TUNING WITH WEIGHTED TEMPORAL CV\n")
+cat(rep("=", 90), "\n", sep="")
 
 # Function to create time series splits
 create_time_series_splits <- function(n_samples, n_splits = 3) {
-  # Calculate size of each test fold
   test_size <- floor(n_samples / (n_splits + 1))
   
   splits <- list()
   for(i in 1:n_splits) {
-    # Each split uses progressively more training data
     train_end <- test_size * i
     test_start <- train_end + 1
     test_end <- min(train_end + test_size, n_samples)
@@ -262,7 +398,6 @@ create_time_series_splits <- function(n_samples, n_splits = 3) {
 # Create temporal CV splits
 cv_splits <- create_time_series_splits(nrow(X_train), n_splits = 3)
 
-# Visualize the splits
 cat("  Temporal CV splits:\n")
 for(i in 1:length(cv_splits)) {
   cat(sprintf("    Fold %d: Train [1:%d], Test [%d:%d]\n", 
@@ -286,12 +421,13 @@ param_grid <- expand.grid(
 
 # Sample combinations for efficiency
 set.seed(999)
-param_grid <- param_grid[sample(nrow(param_grid), 50), ]
+param_grid <- param_grid[sample(nrow(param_grid), 100), ]
 cat(sprintf("  Testing %d parameter combinations with %d-fold temporal CV\n", 
             nrow(param_grid), length(cv_splits)))
 
-# Function to evaluate parameters with temporal CV
-evaluate_params_temporal <- function(params_row, X, y, splits) {
+# Function to evaluate parameters with weighted temporal CV
+evaluate_params_weighted_temporal <- function(params_row, X, y, weights, splits, 
+                                              df_with_props, therapy_cols, therapy_to_prop_map) {
   params <- list(
     objective = "binary:logistic",
     eval_metric = "auc",
@@ -305,17 +441,28 @@ evaluate_params_temporal <- function(params_row, X, y, splits) {
     lambda = params_row$lambda
   )
   
-  # Store AUC for each fold
   fold_aucs <- numeric(length(splits))
   fold_nrounds <- numeric(length(splits))
   
   for(i in 1:length(splits)) {
-    # Get train and test indices for this fold
     train_idx <- splits[[i]]$train
     test_idx <- splits[[i]]$test
     
-    # Create DMatrix objects for this fold
-    dtrain_fold <- xgb.DMatrix(X[train_idx, ], label = y[train_idx])
+    # Create fold-specific weights
+    fold_weights_result <- create_aipw_weights(
+      X[train_idx, ], 
+      df_with_props[train_idx, ],
+      therapy_cols,
+      therapy_to_prop_map
+    )
+    fold_weights <- fold_weights_result$weights
+    
+    # Create weighted DMatrix objects for this fold
+    dtrain_fold <- xgb.DMatrix(
+      X[train_idx, ], 
+      label = y[train_idx],
+      weight = fold_weights
+    )
     dtest_fold <- xgb.DMatrix(X[test_idx, ], label = y[test_idx])
     
     # Train model with early stopping
@@ -330,7 +477,7 @@ evaluate_params_temporal <- function(params_row, X, y, splits) {
       verbose = 0
     )
     
-    # Get predictions and calculate AUC
+    # Get predictions and calculate AUC (unweighted evaluation)
     pred_fold <- predict(model_fold, dtest_fold)
     auc_fold <- as.numeric(auc(roc(y[test_idx], pred_fold, quiet = TRUE)))
     
@@ -338,7 +485,6 @@ evaluate_params_temporal <- function(params_row, X, y, splits) {
     fold_nrounds[i] <- model_fold$best_iteration
   }
   
-  # Return mean AUC across folds
   return(list(
     mean_auc = mean(fold_aucs),
     std_auc = sd(fold_aucs),
@@ -346,7 +492,7 @@ evaluate_params_temporal <- function(params_row, X, y, splits) {
   ))
 }
 
-# Grid search with temporal CV
+# Grid search with weighted temporal CV
 results <- data.frame(param_grid)
 results$cv_auc_mean <- NA
 results$cv_auc_std <- NA
@@ -354,7 +500,16 @@ results$best_nrounds <- NA
 
 pb <- txtProgressBar(min = 0, max = nrow(param_grid), style = 3)
 for(i in 1:nrow(param_grid)) {
-  eval_result <- evaluate_params_temporal(param_grid[i, ], X_train, y_train, cv_splits)
+  eval_result <- evaluate_params_weighted_temporal(
+    param_grid[i, ], 
+    X_train, 
+    y_train, 
+    train_weights,
+    cv_splits,
+    train_data,
+    therapy_cols_in_data,
+    therapy_to_prop
+  )
   results$cv_auc_mean[i] <- eval_result$mean_auc
   results$cv_auc_std[i] <- eval_result$std_auc
   results$best_nrounds[i] <- eval_result$mean_nrounds
@@ -362,8 +517,7 @@ for(i in 1:nrow(param_grid)) {
 }
 close(pb)
 
-# Find best parameters (highest mean AUC with lowest std for stability)
-# Use a combined score: mean_auc - 0.5 * std_auc to favor stable models
+# Find best parameters
 results$score <- results$cv_auc_mean - 0.5 * results$cv_auc_std
 best_idx <- which.max(results$score)
 best_params <- results[best_idx, ]
@@ -375,14 +529,18 @@ print(best_params[, c("max_depth", "eta", "subsample", "colsample_bytree",
                       "min_child_weight", "gamma", "alpha", "lambda", 
                       "best_nrounds")])
 
-# Show top 5 parameter combinations
 cat("\nTop 5 parameter combinations:\n")
 top5 <- results[order(results$score, decreasing = TRUE)[1:5], ]
 print(top5[, c("max_depth", "eta", "cv_auc_mean", "cv_auc_std", "score")])
 
 # ============================================================================
-# TRAIN FINAL MODEL
+# TRAIN FINAL WEIGHTED MODEL
 # ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("TRAINING FINAL WEIGHTED MODEL\n")
+cat(rep("=", 90), "\n", sep="")
 
 best_params_list <- list(
   objective = "binary:logistic",
@@ -397,8 +555,12 @@ best_params_list <- list(
   lambda = best_params$lambda
 )
 
-# Create DMatrix objects
-dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+# Create weighted DMatrix objects
+dtrain <- xgb.DMatrix(
+  data = X_train, 
+  label = y_train,
+  weight = train_weights  # <-- KEY: Use AIPW weights
+)
 dtest <- xgb.DMatrix(data = X_test, label = y_test)
 watchlist <- list(train = dtrain, test = dtest)
 
@@ -412,7 +574,7 @@ xgb_final <- xgb.train(
   verbose = 0
 )
 
-# Get predictions
+# Get predictions (unweighted)
 pred_train <- predict(xgb_final, dtrain)
 pred_test <- predict(xgb_final, dtest)
 
@@ -424,7 +586,16 @@ cat(sprintf("  Training AUC: %.4f\n", auc_train))
 cat(sprintf("  Test AUC: %.4f\n", auc_test))
 cat(sprintf("  Best iteration: %d\n", xgb_final$best_iteration))
 
-# Additional performance metrics
+# ============================================================================
+# PREDICTIVE PERFORMANCE METRICS
+# ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("PREDICTIVE PERFORMANCE METRICS\n")
+cat(rep("=", 90), "\n", sep="")
+
+# ROC analysis
 roc_test <- roc(y_test, pred_test, quiet = TRUE)
 coords <- coords(roc_test, "best", ret = "all", transpose = FALSE)
 optimal_threshold <- coords$threshold[1]
@@ -432,7 +603,7 @@ optimal_threshold <- coords$threshold[1]
 pred_test_binary <- as.integer(pred_test > optimal_threshold)
 cm <- table(Actual = y_test, Predicted = pred_test_binary)
 
-cat("\nConfusion Matrix:\n")
+cat("Confusion Matrix:\n")
 print(cm)
 
 sensitivity <- cm[2,2] / sum(cm[2,])
@@ -446,25 +617,36 @@ cat(sprintf("  Specificity: %.1f%%\n", specificity * 100))
 cat(sprintf("  PPV: %.1f%%\n", ppv * 100))
 cat(sprintf("  NPV: %.1f%%\n", npv * 100))
 
-# get brier score
+# Brier score
 brier_score <- mean((pred_test - y_test)^2)
 cat(sprintf("  Brier Score: %.4f\n", brier_score))
 
-# platt scaled probabilities
+# Platt scaling for calibration
 platt_model <- glm(y_train ~ poly(pred_train, 4), family = binomial)
 platt_probs <- predict(platt_model, newdata = data.frame(pred_train = pred_test), type = "response")
 
 brier_score_platt <- mean((platt_probs - y_test)^2)
 cat(sprintf("  Brier Score (Platt scaled): %.4f\n", brier_score_platt))
 
+# Calibration in the large
+cat(sprintf("\nCalibration:\n"))
+cat(sprintf("  Mean predicted probability: %.3f\n", mean(pred_test)))
+cat(sprintf("  Observed event rate: %.3f\n", mean(y_test)))
+cat(sprintf("  Calibration difference: %.3f\n", mean(pred_test) - mean(y_test)))
+
 # ============================================================================
-# FEATURE IMPORTANCE & SHAP ANALYSIS
+# FEATURE IMPORTANCE & CATEGORIZATION
 # ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("FEATURE IMPORTANCE\n")
+cat(rep("=", 90), "\n", sep="")
 
 # Get XGBoost feature importance
 importance_matrix <- xgb.importance(model = xgb_final)
-cat("\nTop 20 features by gain:\n")
-print(head(importance_matrix[, c("Feature", "Gain")], 20))
+cat("Top 20 features by gain:\n")
+print(head(importance_matrix[, c("Feature", "Gain", "Cover", "Frequency")], 20))
 
 # Categorize features by group
 importance_df <- as.data.frame(importance_matrix)
@@ -473,7 +655,6 @@ importance_df <- importance_df %>%
     feature_group = case_when(
       Feature %in% colnames(X_train)[colnames(X_train) %in% patient_clinical_features] ~ "Patient Clinical",
       Feature %in% colnames(X_train)[colnames(X_train) %in% therapy_features] ~ "Therapy Received",
-      grepl("^prop_", Feature) ~ "Propensity Score",
       Feature %in% colnames(X_train)[colnames(X_train) %in% treatment_context_features] ~ "Treatment Context",
       grepl("therapist_name_|location_|program_|pn_", Feature) ~ "Therapist/Org",
       TRUE ~ "Other"
@@ -486,7 +667,8 @@ group_importance <- importance_df %>%
   summarise(
     total_gain = sum(Gain),
     mean_gain = mean(Gain),
-    n_features = n()
+    n_features = n(),
+    .groups = 'drop'
   ) %>%
   arrange(desc(total_gain))
 
@@ -494,99 +676,18 @@ cat("\nFeature Importance by Group:\n")
 print(group_importance)
 
 # ============================================================================
-# DOUBLY ROBUST ESTIMATION
-# ============================================================================
-
-# Identify therapy columns in the data
-therapy_cols <- therapy_features[therapy_features %in% colnames(X_train)]
-cat(sprintf("  Found %d therapy modalities in data\n", length(therapy_cols)))
-
-dr_results <- list()
-therapy_to_prop <- c(
-  "act" = "prop_act",
-  "cbt" = "prop_cbt", 
-  "dbt" = "prop_dbt",
-  "motivational_interviewing" = "prop_mi",  # <- This is the issue
-  "mindfulness" = "prop_mindfulness",
-  "stages_of_change" = "prop_stages_of_change",  # <- Might also be abbreviated
-  "family_systems" = "prop_family_systems"  # <- Might also be abbreviated
-)
-
-for(therapy in therapy_cols) {
-  prop_col <- therapy_to_prop[therapy]
-  
-  if(!is.na(prop_col) && prop_col %in% colnames(X_train)) {
-    T_i <- X_train[, therapy]
-    e_i <- X_train[, prop_col]
-    e_i <- X_train[, prop_col]
-    
-    # Bound propensity scores away from 0 and 1
-    e_i <- pmax(0.01, pmin(0.99, e_i))
-    
-    # Check sample sizes
-    n_treated <- sum(T_i == 1)
-    n_control <- sum(T_i == 0)
-    
-
-      # Fit separate models for treated and control
-      X_without_therapy <- X_train[, !colnames(X_train) %in% therapy]
-      
-      # Treated model
-      dtrain_t <- xgb.DMatrix(X_without_therapy[T_i == 1, ],
-                              label = y_train[T_i == 1])
-      model_t <- xgb.train(best_params_list, dtrain_t, nrounds = 100, verbose = 0)
-      
-      # Control model
-      dtrain_c <- xgb.DMatrix(X_without_therapy[T_i == 0, ],
-                              label = y_train[T_i == 0])
-      model_c <- xgb.train(best_params_list, dtrain_c, nrounds = 100, verbose = 0)
-      
-      # Predict potential outcomes for all
-      dmatrix_all <- xgb.DMatrix(X_without_therapy)
-      mu_1 <- predict(model_t, dmatrix_all)
-      mu_0 <- predict(model_c, dmatrix_all)
-      
-      # Calculate AIPW estimator
-      tau_i <- mu_1 - mu_0 +
-        T_i * (y_train - mu_1) / e_i -
-        (1 - T_i) * (y_train - mu_0) / (1 - e_i)
-      
-      ate <- mean(tau_i)
-      se <- sd(tau_i) / sqrt(length(tau_i))
-      
-      dr_results[[therapy]] <- list(
-        ate = ate,
-        se = se,
-        ci_lower = ate - 1.96 * se,
-        ci_upper = ate + 1.96 * se,
-        n_treated = n_treated,
-        n_control = n_control
-      )
-      
-      cat(sprintf("  %s: ATE = %.3f (95%% CI: %.3f to %.3f), n_treated=%d\n",
-                  therapy, ate, ate - 1.96*se, ate + 1.96*se, n_treated))
-    } 
-  
-}
-
-# ============================================================================
 # DOUBLY ROBUST ESTIMATION WITH CROSS-FITTING 
 # ============================================================================
 
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("DOUBLY ROBUST ESTIMATION OF THERAPY EFFECTS\n")
+cat(rep("=", 90), "\n", sep="")
+
 # Identify therapy columns in the data
 therapy_cols <- therapy_features[therapy_features %in% colnames(X_train)]
 cat(sprintf("  Found %d therapy modalities in data\n", length(therapy_cols)))
-
-# Mapping between therapy columns and propensity columns
-therapy_to_prop <- c(
-  "act" = "prop_act",
-  "cbt" = "prop_cbt", 
-  "dbt" = "prop_dbt",
-  "motivational_interviewing" = "prop_mi",
-  "mindfulness" = "prop_mindfulness",
-  "stages_of_change" = "prop_stages_of_change",
-  "family_systems" = "prop_family_systems"
-)
+cat("  Using 5-fold cross-fitting to avoid overfitting bias\n\n")
 
 dr_results <- list()
 
@@ -595,25 +696,22 @@ set.seed(123)
 n_folds <- 5
 fold_ids <- sample(rep(1:n_folds, length.out = nrow(X_train)))
 
-cat("  Using 5-fold cross-fitting to avoid overfitting bias\n\n")
-
 for(therapy in therapy_cols) {
   prop_col <- therapy_to_prop[therapy]
   
-  if(!is.na(prop_col) && prop_col %in% colnames(X_train)) {
+  if(!is.na(prop_col) && prop_col %in% colnames(train_data)) {
     T_i <- X_train[, therapy]
-    e_i <- X_train[, prop_col]
+    e_i <- train_data[[prop_col]]
     
-    # Bound propensity scores away from 0 and 1
+    # Bound propensity scores
     e_i <- pmax(0.01, pmin(0.99, e_i))
     
     # Check sample sizes
     n_treated <- sum(T_i == 1)
     n_control <- sum(T_i == 0)
     
-    # Skip if insufficient sample size
     if(n_treated < 20 || n_control < 20) {
-      cat(sprintf("  %s: SKIPPED (n_treated=%d, n_control=%d - insufficient sample)\n",
+      cat(sprintf("  %s: SKIPPED (n_treated=%d, n_control=%d)\n",
                   therapy, n_treated, n_control))
       next
     }
@@ -630,19 +728,17 @@ for(therapy in therapy_cols) {
       test_idx <- which(fold_ids == fold)
       train_idx <- which(fold_ids != fold)
       
-      # Check that we have both treated and control in training fold
+      # Check fold sizes
       n_treated_fold <- sum(T_i[train_idx] == 1)
       n_control_fold <- sum(T_i[train_idx] == 0)
       
       if(n_treated_fold < 5 || n_control_fold < 5) {
-        # If fold is too small, use all data except test fold
-        warning(sprintf("Fold %d has insufficient data, using regularization", fold))
         mu_1_cf[test_idx] <- mean(y_train[train_idx[T_i[train_idx] == 1]])
         mu_0_cf[test_idx] <- mean(y_train[train_idx[T_i[train_idx] == 0]])
         next
       }
       
-      # Train model on treated units (in training folds only)
+      # Train on treated units
       treated_train_idx <- train_idx[T_i[train_idx] == 1]
       dtrain_t <- xgb.DMatrix(X_without_therapy[treated_train_idx, ],
                               label = y_train[treated_train_idx])
@@ -650,11 +746,11 @@ for(therapy in therapy_cols) {
       model_t <- xgb.train(
         params = best_params_list,
         data = dtrain_t,
-        nrounds = 200,  # Increased from 100 for better fit
+        nrounds = 200,
         verbose = 0
       )
       
-      # Train model on control units (in training folds only)
+      # Train on control units
       control_train_idx <- train_idx[T_i[train_idx] == 0]
       dtrain_c <- xgb.DMatrix(X_without_therapy[control_train_idx, ],
                               label = y_train[control_train_idx])
@@ -662,18 +758,17 @@ for(therapy in therapy_cols) {
       model_c <- xgb.train(
         params = best_params_list,
         data = dtrain_c,
-        nrounds = 200,  # Increased from 100 for better fit
+        nrounds = 200,
         verbose = 0
       )
       
-      # Predict on test fold (out-of-sample predictions)
+      # Predict on test fold
       dtest_fold <- xgb.DMatrix(X_without_therapy[test_idx, ])
       mu_1_cf[test_idx] <- predict(model_t, dtest_fold)
       mu_0_cf[test_idx] <- predict(model_c, dtest_fold)
     }
     
-    # Calculate AIPW estimator using cross-fitted predictions
-    # This avoids overfitting bias in the outcome models
+    # Calculate AIPW estimator
     tau_i <- mu_1_cf - mu_0_cf +
       T_i * (y_train - mu_1_cf) / e_i -
       (1 - T_i) * (y_train - mu_0_cf) / (1 - e_i)
@@ -690,10 +785,10 @@ for(therapy in therapy_cols) {
       ci_upper = ate + 1.96 * se,
       n_treated = n_treated,
       n_control = n_control,
-      p_value = 2 * (1 - pnorm(abs(ate / se)))  # Two-sided p-value
+      p_value = 2 * (1 - pnorm(abs(ate / se)))
     )
     
-    # Determine significance
+    # Significance indicator
     p_val <- dr_results[[therapy]]$p_value
     sig_star <- if(p_val < 0.001) "***" else if(p_val < 0.01) "**" else if(p_val < 0.05) "*" else ""
     
@@ -706,7 +801,6 @@ for(therapy in therapy_cols) {
 if(length(dr_results) > 0) {
   cat("\n  Summary of therapy associations:\n")
   
-  # Count significant effects
   p_values <- sapply(dr_results, function(x) x$p_value)
   n_sig_05 <- sum(p_values < 0.05)
   n_sig_01 <- sum(p_values < 0.01)
@@ -715,7 +809,6 @@ if(length(dr_results) > 0) {
   cat(sprintf("    Significant at p<0.05: %d\n", n_sig_05))
   cat(sprintf("    Significant at p<0.01: %d\n", n_sig_01))
   
-  # Identify best therapy
   ates <- sapply(dr_results, function(x) x$ate)
   best_therapy <- names(which.max(ates))
   best_ate <- max(ates)
@@ -723,25 +816,27 @@ if(length(dr_results) > 0) {
   cat(sprintf("    Largest effect: %s (%.1f percentage points)\n", 
               best_therapy, best_ate * 100))
   
-  # Check for any harmful effects
   harmful <- names(ates[ates < -0.01])
   if(length(harmful) > 0) {
     cat(sprintf("    ⚠ Potentially harmful (>1pp decrease): %s\n", 
                 paste(harmful, collapse = ", ")))
   }
-} else {
-  cat("\n  ⚠ No therapies could be evaluated with doubly robust estimation\n")
 }
 
 # ============================================================================
-# COUNTERFACTUAL ANALYSIS
+# COUNTERFACTUAL ANALYSIS FOR PERSONALIZATION
 # ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("COUNTERFACTUAL ANALYSIS\n")
+cat(rep("=", 90), "\n", sep="")
 
 # Get observed therapy combinations
 combo_matrix <- X_test[, therapy_cols]
 combo_strings <- apply(combo_matrix, 1, paste, collapse = "-")
 combo_counts <- table(combo_strings)
-top_combos <- names(sort(combo_counts, decreasing = TRUE)[1:min(50, length(combo_counts))])
+top_combos <- names(sort(combo_counts, decreasing = TRUE)[1:min(15, length(combo_counts))])
 
 cat(sprintf("  Evaluating %d therapy combinations\n", length(top_combos)))
 
@@ -780,10 +875,11 @@ for(i in 1:nrow(X_test)) {
 }
 close(pb)
 
+# Create visualization data
 personalization_viz_data <- data.frame(
   baseline_prob = pred_test,
-  gain = personalization_gains * 100,  # Convert to percentage points
-  initial_risk = test_data$risk_level_initial[!is.na(y_test)],
+  gain = personalization_gains * 100,
+  initial_risk = test_data$risk_level_initial,
   observed_outcome = y_test,
   gain_category = cut(personalization_gains * 100,
                       breaks = c(-Inf, 0, 1, 5, Inf),
@@ -791,8 +887,6 @@ personalization_viz_data <- data.frame(
                                  "Moderate (1-5pp)", "Large (>5pp)"),
                       include.lowest = TRUE)
 )
-
-sink('outputs/tables/counterfactual_analysis.txt')
 
 # Calculate summary statistics
 mean_gain <- mean(personalization_gains)
@@ -810,24 +904,15 @@ cat(sprintf("  Maximum gain: %.3f\n", max(personalization_gains)))
 cat(sprintf("  NNT to prevent one non-improvement: %.0f\n",
             ifelse(mean_gain > 0, 1/mean_gain, Inf)))
 
-# figure out percentage gain among patients who would benefit
+# Gain among benefiters
 if(sum(personalization_gains > 0) > 0) {
   mean_gain_benefiters <- mean(personalization_gains[personalization_gains > 0])
   cat(sprintf("  Mean gain among benefiters: %.3f (%.1f%% relative improvement)\n",
               mean_gain_benefiters,
               mean_gain_benefiters / mean(pred_test[personalization_gains > 0]) * 100))
-} else {
-  cat("  No patients would benefit from therapy optimization.\n")
 }
 
-# figure out what predicted probability groups benefit most
-pred_bins <- cut(pred_test, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)
-gain_by_bin <- tapply(personalization_gains, pred_bins, mean)
-cat("\nMean Personalization Gain by Predicted Probability Bin:\n")
-for(bin in names(gain_by_bin)) {
-  cat(sprintf("  %s: %.3f\n", bin, gain_by_bin[bin]))
-}
-
+# Gains by predicted probability quartile
 summary_by_quartile <- personalization_viz_data %>%
   mutate(prob_quartile = cut(baseline_prob,
                              breaks = quantile(baseline_prob,
@@ -846,23 +931,29 @@ summary_by_quartile <- personalization_viz_data %>%
     .groups = 'drop'
   )
 
-cat("\n")
-cat(rep("=", 90), "\n", sep = "")
-cat("PERSONALIZATION GAINS BY BASELINE PROBABILITY QUARTILE\n")
-cat(rep("=", 90), "\n", sep = "")
-print(summary_by_quartile, width = Inf)
-sink()
+cat("\nPersonalization Gains by Baseline Probability Quartile:\n")
+print(summary_by_quartile)
 
 # ============================================================================
-# RESULTS FOR MANUSCRIPT
+# EXPORT RESULTS FOR MANUSCRIPT
 # ============================================================================
+
+cat("\n")
+cat(rep("=", 90), "\n", sep="")
+cat("EXPORTING RESULTS\n")
+cat(rep("=", 90), "\n", sep="")
 
 # Create results list
 manuscript_results <- list(
+  # Model info
+  model_type = "AIPW-weighted XGBoost",
+  
   # Model performance
   model_performance = data.frame(
-    metric = c("AUC_train", "AUC_test", "Sensitivity", "Specificity", "PPV", "NPV"),
-    value = c(auc_train, auc_test, sensitivity, specificity, ppv, npv)
+    metric = c("AUC_train", "AUC_test", "Sensitivity", "Specificity", 
+               "PPV", "NPV", "Brier", "Brier_Platt"),
+    value = c(auc_train, auc_test, sensitivity, specificity, ppv, npv,
+              brier_score, brier_score_platt)
   ),
   
   # Feature importance by group
@@ -876,8 +967,9 @@ manuscript_results <- list(
       se = sapply(dr_results, function(x) x$se),
       ci_lower = sapply(dr_results, function(x) x$ci_lower),
       ci_upper = sapply(dr_results, function(x) x$ci_upper),
+      p_value = sapply(dr_results, function(x) x$p_value),
       n_treated = sapply(dr_results, function(x) x$n_treated)
-    )
+    ) %>% arrange(desc(ate))
   } else NULL,
   
   # Personalization summary
@@ -888,8 +980,21 @@ manuscript_results <- list(
               max(personalization_gains), ifelse(mean_gain > 0, 1/mean_gain, NA))
   ),
   
+  # Personalization by quartile
+  personalization_by_quartile = summary_by_quartile,
+  
   # Model object
   xgboost_model = xgb_final,
+  
+  # Weights diagnostics
+  weight_summary = data.frame(
+    dataset = c("Training", "Test"),
+    mean = c(mean(train_weights), mean(test_weights)),
+    median = c(median(train_weights), median(test_weights)),
+    sd = c(sd(train_weights), sd(test_weights)),
+    min = c(min(train_weights), min(test_weights)),
+    max = c(max(train_weights), max(test_weights))
+  ),
   
   # Individual predictions
   predictions = data.frame(
@@ -899,9 +1004,18 @@ manuscript_results <- list(
       paste(therapy_cols[x == 1], collapse = "+"))
   )
 )
-manuscript_results$personalization_summary
-manuscript_results$model_performance
-manuscript_results$feature_importance
+
+# Save results
+saveRDS(manuscript_results, "outputs/aipw_xgboost_results.rds")
+cat("  Results saved to: outputs/aipw_xgboost_results.rds\n")
+
+# Save detailed counterfactual analysis
+sink('outputs/tables/counterfactual_analysis_aipw.txt')
+cat(rep("=", 90), "\n", sep = "")
+cat("PERSONALIZATION GAINS BY BASELINE PROBABILITY QUARTILE (AIPW MODEL)\n")
+cat(rep("=", 90), "\n", sep = "")
+print(summary_by_quartile, width = Inf)
+sink()
 
 # ============================================================================
 # FINAL SUMMARY
@@ -912,10 +1026,24 @@ cat(rep("=", 90), "\n", sep="")
 cat("ANALYSIS COMPLETE - SUMMARY FOR MANUSCRIPT\n")
 cat(rep("=", 90), "\n", sep="")
 
+cat(sprintf("\nMODEL TYPE:\n"))
+cat(sprintf("   AIPW-weighted XGBoost (propensity scores used as weights, not features)\n"))
+
 cat(sprintf("\nPREDICTIVE PERFORMANCE:\n"))
 cat(sprintf("   Test set AUROC: %.3f\n", auc_test))
-cat(sprintf("   Sensitivity at optimal threshold: %.1f%%\n", sensitivity * 100))
+cat(sprintf("   Sensitivity: %.1f%%\n", sensitivity * 100))
+cat(sprintf("   Brier score: %.4f\n", brier_score))
 
+cat(sprintf("\nTHERAPY ASSOCIATIONS:\n"))
+if(length(dr_results) > 0) {
+  cat(sprintf("   Therapies evaluated: %d\n", length(dr_results)))
+  cat(sprintf("   Significant effects (p<0.05): %d\n", sum(p_values < 0.05)))
+  if(length(ates) > 0) {
+    cat(sprintf("   Largest benefit: %s (%.1f pp, p=%.3f)\n",
+                names(which.max(ates)), max(ates) * 100,
+                dr_results[[names(which.max(ates))]]$p_value))
+  }
+}
 
 cat(sprintf("\nPERSONALIZATION POTENTIAL:\n"))
 cat(sprintf("   Patients who could benefit: %.1f%%\n", pct_benefit))
@@ -924,4 +1052,5 @@ cat(sprintf("   Number needed to treat: %.0f\n", ifelse(mean_gain > 0, 1/mean_ga
 
 cat("\n")
 cat(rep("=", 90), "\n", sep="")
-
+cat("\nAll results exported to outputs/ directory\n")
+cat(rep("=", 90), "\n", sep="")

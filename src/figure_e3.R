@@ -20,11 +20,6 @@ bin_stats <- personalization_viz_data %>%
 # Main plot
 p_personalization <- ggplot(personalization_viz_data, 
                             aes(x = baseline_prob, y = gain)) +
-  # Background ribbon showing IQR
-  geom_ribbon(data = bin_stats,
-              aes(x = mean_prob, ymin = q25, ymax = q75),
-              fill = "#E8F4F8", alpha = 0.7, inherit.aes = FALSE) +
-  
   # Individual points colored by gain category
   geom_point(aes(color = gain_category, shape = initial_risk),
              alpha = 0.9, size = 1.5) +
@@ -148,7 +143,7 @@ p_by_risk <- ggplot(personalization_viz_data,
 p_combined <- cowplot::plot_grid(
   p_personalization,
   p_by_risk + theme(legend.position = "none"),
-  ncol = 2,
+  ncol = 1,
   rel_heights = c(1, 1),
   labels = c("A", "B"),
   label_size = 14,
@@ -160,8 +155,16 @@ p_combined
 ggsave(
   plot = p_combined,
   filename = "outputs/figures/figure_e3.png",
-  width = 15,
-  height = 5,
+  width = 7,
+  height = 8,
+  dpi = 300, bg = "white"
+)
+
+ggsave(
+  plot = p_combined,
+  filename = "outputs/figures/figure_e3.pdf",
+  width = 7,
+  height = 8,
   dpi = 300, bg = "white"
 )
 

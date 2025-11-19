@@ -8,7 +8,7 @@ theme_publication <- function() {
   theme_minimal() +
     theme(
       text = element_text(size = 12),
-      plot.title = element_text(size = 12, face = "bold", hjust = 0),
+      plot.title = element_text(size = 12, hjust = 0),
       plot.subtitle = element_text(size = 10, color = "black", hjust = 0),
       axis.text = element_text(size = 9, color = "black"),
       axis.line = element_line(color = "black", size = 0.3),
@@ -66,9 +66,6 @@ include_patterns <- c(
   "^act$", "^cbt$", "^dbt$", "^motivational_interviewing$",
   "^mindfulness$", "^stages_of_change$", "^family_systems$",
   
-  # Propensity scores
-  "^prop_",
-  
   # Treatment context (but not provider IDs)
   "^therapy_duration_category_", "^delivery_method_", "^session_mode_"
 )
@@ -112,105 +109,77 @@ for(feat in top_features) {
                             shap_value = shap_values_clean[, feat_idx]
                           ))
 }
-
-# Create clean feature labels
 shap_plot_data$feature_clean <- case_when(
-  # Core clinical features
-  shap_plot_data$feature == "total_score" ~ "Total symptom score",
-  shap_plot_data$feature == "risk_high_initial" ~ "High risk at intake",
-  shap_plot_data$feature == "days_first_srs" ~ "Days to reassessment",
-  shap_plot_data$feature == "intake_to_pn" ~ "Days to first therapy",
-  shap_plot_data$feature == "adolescent" ~ "Adolescent",
-  shap_plot_data$feature == "male" ~ "Male sex",
+  shap_plot_data$feature == "risk_high_initial" ~ 
+    "High suicide risk at intake",
   
-  # C-SSRS items
-  shap_plot_data$feature == "frequency_month" ~ "SI frequency (past month)",
-  shap_plot_data$feature == "duration_month" ~ "SI duration (past month)",
-  shap_plot_data$feature == "deterrents_month" ~ "Deterrents present",
-  shap_plot_data$feature == "are_there_things" ~ "Protective factors",
+  shap_plot_data$feature == "total_score" ~ 
+    "C-SSRS total score (0–25)",
   
-  # Therapies
-  shap_plot_data$feature == "cbt" ~ "CBT received",
-  shap_plot_data$feature == "dbt" ~ "DBT received",
-  shap_plot_data$feature == "act" ~ "ACT received",
-  shap_plot_data$feature == "motivational_interviewing" ~ "MI received",
-  shap_plot_data$feature == "mindfulness" ~ "Mindfulness received",
-  shap_plot_data$feature == "family_systems" ~ "Family therapy received",
-  shap_plot_data$feature == "stages_of_change" ~ "Stages of change received",
+  shap_plot_data$feature == "how_many_times_have_you_had_these_thoughts" ~ 
+    "SI frequency (lifetime)",
   
-  # Propensity scores
-  grepl("^prop_cbt", shap_plot_data$feature) ~ "Propensity: CBT",
-  grepl("^prop_dbt", shap_plot_data$feature) ~ "Propensity: DBT",
-  grepl("^prop_act", shap_plot_data$feature) ~ "Propensity: ACT",
-  grepl("^prop_mi", shap_plot_data$feature) ~ "Propensity: MI",
-  grepl("^prop_mindfulness", shap_plot_data$feature) ~ "Propensity: Mindfulness",
-  grepl("^prop_family", shap_plot_data$feature) ~ "Propensity: Family",
+  shap_plot_data$feature == "deterrents_month" ~ 
+    "Suicide deterrents (past month)",
   
-  # Diagnoses
-  grepl("depression", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: Depression",
-  grepl("anxiety", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: Anxiety",
-  grepl("bipolar", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: Bipolar",
-  grepl("ptsd|trauma", shap_plot_data$feature, ignore.case = TRUE) ~ "Dx: PTSD/Trauma",
+  shap_plot_data$feature == "frequency_month" ~ 
+    "SI frequency (past month)",
   
-  # Symptoms
-  grepl("presenting_symptoms_", shap_plot_data$feature) ~ 
-    gsub("presenting_symptoms_", "Symptom: ", shap_plot_data$feature),
+  shap_plot_data$feature == "internal_protective_factors_frustration_tolerance" ~ 
+    "PF (internal): Frustration tolerance",
   
-  # Default
+  shap_plot_data$feature ==
+    "precipitants_stressors_chronic_physical_pain_or_other_acute_medical_problem_e_g_cns_disorders" ~
+    "Stressor: Chronic pain / acute medical problem",
+  
+  shap_plot_data$feature == "internal_protective_factors_religious_beliefs" ~
+    "PF (internal): Religious beliefs",
+  
+  shap_plot_data$feature == "when_you_have_the_thoughts_how_long_do_they_last" ~
+    "SI duration (episode length)",
+  
+  shap_plot_data$feature == "presenting_symptoms_anhedonia_lack_of_pleasure" ~
+    "Symptom: Anhedonia",
+  
+  shap_plot_data$feature == "are_there_things" ~ 
+    "Protective factors present",
+  
+  shap_plot_data$feature == "adolescent" ~ 
+    "Adolescent patient",
+  
+  shap_plot_data$feature == "internal_protective_factors_identifies_reasons_for_living" ~ 
+    "PF (internal): Reasons for living",
+  
+  shap_plot_data$feature == "what_sort_of_reasons" ~ 
+    "PF (internal): Reasons for living (details)",
+  
+  shap_plot_data$feature ==
+    "could_can_you_stop_thinking_about_killing_yourself_or_wanting_to_die_if_you_want_to" ~
+    "Controllability of suicidal thoughts",
+  
+  shap_plot_data$feature == "motivational_interviewing" ~ 
+    "MI received",
+  
+  shap_plot_data$feature == "mindfulness" ~ 
+    "Mindfulness received",
+  
+  shap_plot_data$feature == "dx_group_Trauma_Related_Disorder" ~ 
+    "Dx: Trauma-related disorder",
+  
+  shap_plot_data$feature ==
+    "external_protective_factors_cultural_spiritual_and_or_moral_attitudes_against_suicide" ~
+    "PF (external): Cultural/moral attitudes against suicide",
+  
+  shap_plot_data$feature == "family_history_none" ~ 
+    "No family psychiatric history",
+  
   TRUE ~ gsub("_", " ", shap_plot_data$feature)
 )
-
-
 # Normalize feature values for coloring (0-1 scale)
 shap_plot_data <- shap_plot_data %>%
   group_by(feature) %>%
   mutate(feature_value_norm = (feature_value - min(feature_value, na.rm = TRUE)) /
            (max(feature_value, na.rm = TRUE) - min(feature_value, na.rm = TRUE) + 1e-10))
-
-# Create clean feature labels for SHAP plot (C-SSRS-accurate)
-shap_plot_data$feature_clean <- case_when(
-  # Risk and severity measures
-  shap_plot_data$feature == "risk_high_initial" ~ "High risk at intake",
-  shap_plot_data$feature == "total_score" ~ "C-SSRS total score",
-  
-  # C-SSRS specific items about suicidal ideation
-  shap_plot_data$feature == "frequency_month" ~ "SI frequency (past month)",
-  shap_plot_data$feature == "duration_month" ~ "SI duration when present (past month)",
-  shap_plot_data$feature == "could_can_you_stop_thinking_about_killing_yourself_or_wanting_to_die_if_you_want_to" ~ "SI controllability (past month)",
-  shap_plot_data$feature == "deterrents_month" ~ "Deterrents to suicide (past month)",
-  shap_plot_data$feature == "how_many_times_have_you_had_these_thoughts" ~ "Number of SI episodes",
-  shap_plot_data$feature == "when_you_have_the_thoughts_how_long_do_they_last" ~ "Duration of SI episodes",
-  shap_plot_data$feature == "what_sort_of_reasons" ~ "Reasons for SI",
-  shap_plot_data$feature == "are_there_things" ~ "Factors preventing suicide",
-  
-  # Protective factors (internal)
-  shap_plot_data$feature == "internal_protective_factors_identifies_reasons_for_living" ~ "Identifies reasons for living",
-  shap_plot_data$feature == "internal_protective_factors_ability_to_cope_with_stress" ~ "Ability to cope with stress",
-  shap_plot_data$feature == "internal_protective_factors_able_to_access_care_willing_to_reach_out" ~ "Willing to seek help",
-  shap_plot_data$feature == "internal_protective_factors_fear_of_death_or_the_actual_act_of_killing_self" ~ "Fear of death/dying",
-  
-  # Protective factors (external)
-  shap_plot_data$feature == "external_protective_factors_supportive_social_network_of_family_or_friends" ~ "Supportive social network",
-  
-  # Risk factors/stressors
-  shap_plot_data$feature == "precipitants_stressors_social_isolation" ~ "Social isolation",
-  shap_plot_data$feature == "precipitants_stressors_inadequate_social_supports" ~ "Inadequate social support",
-  
-  # Treatment received
-  shap_plot_data$feature == "stages_of_change" ~ "Stages of Change (received)",
-  
-  # Propensity scores (likelihood of receiving each therapy)
-  shap_plot_data$feature == "prop_act" ~ "Propensity to receive ACT",
-  shap_plot_data$feature == "prop_cbt" ~ "Propensity to receive CBT",
-  shap_plot_data$feature == "prop_dbt" ~ "Propensity to receive DBT",
-  shap_plot_data$feature == "prop_mi" ~ "Propensity to receive MI",
-  shap_plot_data$feature == "prop_mindfulness" ~ "Propensity to receive Mindfulness",
-  shap_plot_data$feature == "prop_family_systems" ~ "Propensity to receive Family therapy",
-  shap_plot_data$feature == "prop_stages_of_change" ~ "Propensity to receive Stages of Change",
-  
-  # Default
-  TRUE ~ shap_plot_data$feature
-)
 
 feature_order <- shap_plot_data %>%
   group_by(feature_clean) %>%
@@ -231,7 +200,7 @@ panel_a <- ggplot(shap_plot_data, aes(x = shap_value, y = feature_clean)) +
                         labels = c("Low",  "High")) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "red", size = 0.3) +
   labs(
-    title = "A. Feature importance for improvement prediction",
+    title = "Feature importance for improvement prediction",
     subtitle = "SHAP values quantify impact on predicted probability",
     x = "SHAP value (impact on prediction)",
     y = NULL
@@ -294,7 +263,7 @@ if(length(dr_results) > 0) {
                       guide = "none") +
     coord_flip() +
     labs(
-      title = "B. Therapy-specific associations with improvement",
+      title = "Therapy-specific associations with improvement",
       subtitle = "Doubly robust estimates accounting for selection bias",
       x = NULL,
       y = "Difference in improvement probability (percentage points)"
@@ -308,14 +277,16 @@ if(length(dr_results) > 0) {
 # COMBINE PANELS
 # ============================================================================
 
-# Combine plots using cowplot
-figure <- plot_grid(
-  panel_a, panel_b,
+
+figure <- cowplot::plot_grid(
+  panel_a, panel_b + theme(legend.position = "none"),
   ncol = 1,
-  rel_widths = c(2, 1),
-  align = "h",
-  axis = "tb"
+  rel_heights = c(1, 1),
+  labels = c("A", "B"),
+  label_size = 14,
+  align = "v"
 )
+
 
 ggsave("outputs/figures/figure3.png", 
        figure, 
@@ -324,4 +295,10 @@ ggsave("outputs/figures/figure3.png",
        dpi = 300,
        bg = "white")
 
+ggsave("outputs/figures/figure3.pdf", 
+       figure, 
+       width = 8 ,
+       height = 8, 
+       dpi = 300,
+       bg = "white")
 
